@@ -32,6 +32,11 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         help="target project directory (default: current directory)",
     )
+    parser.add_argument(
+        "--no-probe",
+        action="store_true",
+        help="skip the startup model probe (disables role gating)",
+    )
     return parser
 
 
@@ -59,7 +64,7 @@ def main(argv: list[str] | None = None) -> int:
 
     from vyvcode.repl import run_repl
 
-    return run_repl(cfg)
+    return run_repl(cfg, do_probe=not args.no_probe)
 
 
 if __name__ == "__main__":
