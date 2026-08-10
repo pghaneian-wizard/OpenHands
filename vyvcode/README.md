@@ -35,7 +35,10 @@ First run installs `.agents/agents/` + `.agents/skills/` into the project
 | `/vyvcode:grill <topic>` | standalone interview, no handoff |
 | `/memory-recall <query>` | search project memory, answer with dates |
 | `/vyvcode:status` / `/vyvcode:stop` | run state / graceful abort |
+| `/vyvcode:autoresearch …` | overnight ML-research loop on karpathy/autoresearch — see `../docs/vyvcode/AUTORESEARCH.md` |
 | `!raw <text>` | bypass the optimizer verbatim |
+
+`/vyvecode:` (typo) is a silent alias of `/vyvcode:` everywhere.
 
 Everything downstream of the Communicator runs full auto (`NeverConfirm`).
 The only user gates: grill answers, and the optional plan gate
@@ -48,7 +51,7 @@ overridable without touching code. Run artifacts land in
 ## Development
 
 ```bash
-uv run pytest tests -q        # 89 tests, no network, <15s
+uv run pytest tests -q        # 130 tests, no network, no GPU
 ```
 
 Docs: `../docs/vyvcode/ARCHITECTURE.md` (design + trust boundaries),

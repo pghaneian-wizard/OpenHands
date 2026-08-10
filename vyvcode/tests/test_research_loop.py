@@ -162,7 +162,8 @@ class TestGuard:
     def test_second_violation_abandons_experiment(self, tmp_path):
         cfg, session, base_sha = prepared(tmp_path)
         researcher = editing_researcher(
-            tmp_path, smuggle=("prepare.py",), smuggle_on_reprompt=True
+            tmp_path, smuggle=("prepare.py", "pyproject.toml"),
+            smuggle_on_reprompt=True,
         )
         trains = scripted_trains([0.90])
 
@@ -172,6 +173,12 @@ class TestGuard:
         assert len(trains.queue) == 1  # training never ran
         assert head_sha(tmp_path) == base_sha
         assert (tmp_path / "prepare.py").read_text() == "# fixed\n"
+        assert not (tmp_path / "pyproject.toml").exists()  # stray file cleaned
+        committed = subprocess.run(
+            ["git", "show", "--name-only", "--format=", "HEAD"], cwd=tmp_path,
+            capture_output=True, text=True, check=True,
+        ).stdout.split()
+        assert "pyproject.toml" not in committed  # cannot be smuggled into git
         last = session.tsv_path.read_text().splitlines()[-1]
         assert "\tdiscard\t" in last
         assert session.state["counts"]["discarded"] == 1

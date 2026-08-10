@@ -81,6 +81,8 @@ def _head_sha(repo: Path) -> str:
 class ResearchSession:
     """One autoresearch session: state.json, journal, experiments.jsonl, logs/."""
 
+    secrets: tuple[str, ...] = ()  # set from cfg by setup/start; used by journal()
+
     def __init__(self, ar_dir: Path, tag: str = "", session_id: str | None = None):
         self.ar_dir = Path(ar_dir)
         if session_id is None:
@@ -142,9 +144,26 @@ class ResearchSession:
             pass
 
     def journal(self, text: str) -> None:
+        from vyvcode.config import redact
+
         stamp = _dt.datetime.now(_dt.UTC).strftime("%H:%M")
         with open(self.dir / "journal.md", "a", encoding="utf-8") as f:
-            f.write(f"\n### {stamp}\n{text.strip()}\n")
+            f.write(f"\n### {stamp}\n{redact(text.strip(), self.secrets)}\n")
+
+    def write_best(self) -> None:
+        (self.dir / "best.json").write_text(
+            json.dumps(self.state["best"], indent=2) + "\n"
+        )
+
+    def size_warning(self, limit_bytes: int = 1 << 30) -> str | None:
+        if self.state.get("size_warned"):
+            return None
+        total = sum(f.stat().st_size for f in self.dir.rglob("*") if f.is_file())
+        if total > limit_bytes:
+            self.state["size_warned"] = True
+            self.save()
+            return f"session dir {self.dir} exceeds 1 GB ({total >> 20} MB)"
+        return None
 
     def journal_tail(self, n: int) -> str:
         path = self.dir / "journal.md"
@@ -503,6 +522,7 @@ def setup(
         _git(target, "commit", "-m", "vyvcode: insert auto-managed strategy block")
 
     session = ResearchSession(target, tag=tag)
+    session.secrets = cfg.secret_values
     acquire_lock(target, session.session_id, out=out)
     try:
         # 5. double baseline — the spread is PJ's empirical noise floor (D13)
@@ -535,6 +555,7 @@ def setup(
         session.state["baseline"] = {"sha": sha, "val_bpb": best, "spread": spread}
         session.state["best"] = {"sha": sha, "val_bpb": best, "exp_id": 0}
         session.save()
+        session.write_best()
         session.journal(
             f"setup complete on {branch}: baselines {first.val_bpb:.6f} / "
             f"{second.val_bpb:.6f}, spread {spread:.6f}"
@@ -838,6 +859,7 @@ def start(cfg: VyvConfig, ar_dir: Path, out=print, max_experiments=None,
     if session is None or not session.state.get("baseline"):
         return "no prepared session (run /vyvcode:autoresearch setup first)"
     session.reload()
+    session.secrets = cfg.secret_values
     session.state["stop"] = None
     session.save(preserve_stop=False)
     acquire_lock(ar_dir, session.session_id, out=out)
@@ -903,6 +925,10 @@ def run_loop(cfg: VyvConfig, ar_dir: Path, session: ResearchSession, out=print,
             continue
 
         _maybe_strategist(cfg, session, strategist_fn, out)
+        warning = session.size_warning()
+        if warning:
+            session.journal(warning)
+            out(warning)
 
 
 def redact_exc(cfg: VyvConfig, exc: Exception) -> str:
@@ -1000,6 +1026,7 @@ def run_experiment(cfg: VyvConfig, ar_dir: Path, session: ResearchSession,
     if result.val_bpb < best["val_bpb"] - epsilon:
         session.state["best"] = {"sha": sha, "val_bpb": result.val_bpb,
                                  "exp_id": exp_id}
+        session.write_best()
         _vram_soft_check(cfg, session, result, exp_id)
         _record(cfg, session, exp_id, sha, hypothesis, result, "keep", "",
                 tokens=getattr(researcher_fn, "last_tokens", 0), out=out)
@@ -1176,6 +1203,7 @@ def default_strategist_pass(cfg: VyvConfig, session: ResearchSession,
     # discard's reset --hard would rewind the strategy away.
     session.state["best"]["sha"] = _head_sha(ar_dir)
     session.save()
+    session.write_best()
     session.journal(f"strategist pass {session.state['strategist_passes']} "
                     f"({trigger}) rewrote the strategy block")
     out(f"strategist pass {session.state['strategist_passes']} ({trigger})")

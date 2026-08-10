@@ -44,3 +44,16 @@ and network-dependent for the build gates.
 **Impact:** CLI verbs, flags, and JSON shapes were verified against the installed memsearch 0.4.17
 (`index`/`search -j`/`expand`, fields score/source/heading/content/chunk_hash); only the embedding
 inference itself is unexercised until first live use.
+
+## D-005 — Autoresearch live baselines deferred (GPU occupied)
+
+**What:** B13's GPU-box acceptance was run live on absolem at build time — real upstream clone,
+real `uv sync`, genuine cache detection (`~/.cache/autoresearch` already prepared 2026-08-09),
+real `autoresearch/aug10` branch with committed strategy delimiters, tsv + session init — but the
+two 5-minute baseline training runs were stubbed: nvidia-smi showed a live vLLM server holding
+~55 GB of the RTX PRO 6000's VRAM, and launching training next to PJ's serving stack was not an
+acceptable autonomous risk. Smoke checkout preserved at `~/.cache/vyvcode-ar-smoke`.
+**Why:** Do-no-harm to a production-adjacent GPU process beats completing the gate unattended.
+**Impact:** The training runner itself is exercised by the SIGKILL-timeout test and the stub
+train.py suite; first real baselines happen in PJ's §7.3 smoke (run on a free GPU, or after
+stopping the vLLM server).
