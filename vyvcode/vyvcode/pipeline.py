@@ -11,7 +11,7 @@ from __future__ import annotations
 import datetime as _dt
 
 from vyvcode import memory
-from vyvcode.config import VyvConfig
+from vyvcode.config import VyvConfig, redact
 from vyvcode.grill import gather_context, run_grill
 from vyvcode.models import llm_for
 from vyvcode.optimizer import optimize
@@ -47,6 +47,7 @@ def run_pipeline(
 ) -> str:
     """Run the full pipeline; returns the closing line for the REPL."""
     ask_user = ask_user or (lambda: input("answers> "))
+    raw_text = redact(raw_text, cfg.secret_values)  # never toward a model or disk
     run = Run(cfg.runs_dir, raw_text or mode)
     (run.dir / "input.raw.md").write_text(raw_text + "\n")
 

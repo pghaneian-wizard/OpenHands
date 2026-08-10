@@ -125,6 +125,30 @@ class TestGuards:
         assert "planner" in message and "reviewer" in message
 
 
+class TestSecretBoundary:
+    def test_pasted_key_redacted_before_any_model_sees_it(self, tmp_path, monkeypatch):
+        import vyvcode.commands as commands_mod
+
+        cfg = load_config(tmp_path, env={"ANTHROPIC_API_KEY": "sk-ant-test12345678"})
+        handlers = Handlers(cfg)
+        seen = {}
+
+        def fake_optimize(text, llm, cfg_, bypass=False, **kw):
+            seen["text"] = text
+            return type("R", (), {"text": text})()
+
+        monkeypatch.setattr(commands_mod, "optimize", fake_optimize)
+        monkeypatch.setattr(commands_mod, "run_fast_path", lambda *a, **k: None)
+        monkeypatch.setattr(
+            "vyvcode.memory.write_digest", lambda *a, **k: None
+        )
+        handlers._communicator = object()
+
+        handlers.chat("use my key sk-ant-test12345678 for the deploy")
+
+        assert "sk-ant-test12345678" not in seen["text"]
+
+
 class TestFastPath:
     def test_fast_path_edits_file_via_mocked_coder(self, tmp_path):
         from openhands.tools.terminal import TerminalTool

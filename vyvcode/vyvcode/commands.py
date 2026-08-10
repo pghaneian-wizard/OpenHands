@@ -10,7 +10,7 @@ import datetime as _dt
 from dataclasses import dataclass
 from pathlib import Path
 
-from vyvcode.config import VyvConfig
+from vyvcode.config import VyvConfig, redact
 from vyvcode.models import llm_for
 from vyvcode.optimizer import optimize
 from vyvcode.run_state import abort_active, active_run, render_status
@@ -73,6 +73,8 @@ class Handlers:
         return self._communicator
 
     def _optimized(self, text: str, bypass: bool = False) -> str:
+        # Keys never ride inside prompt text, toward any provider (§16).
+        text = redact(text, self.cfg.secret_values)
         result = optimize(text, self.communicator_llm(), self.cfg, bypass=bypass)
         return result.text
 
@@ -91,7 +93,10 @@ class Handlers:
         refusal = self._require_roles({"communicator", "coder"})
         if refusal:
             return refusal
-        message = text if bypass else self._optimized(text)
+        if bypass:
+            message = redact(text, self.cfg.secret_values)
+        else:
+            message = self._optimized(text)
         run_fast_path(self.cfg, message)
         from vyvcode import memory
 

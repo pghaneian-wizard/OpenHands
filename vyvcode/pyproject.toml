@@ -19,6 +19,12 @@ vyvcode = "vyvcode.cli:main"
 [dependency-groups]
 dev = ["pytest>=8.3.0"]
 
+[tool.uv]
+# PYSEC-2026-3447: transitive setuptools < 83 flagged by pip-audit. memsearch
+# 0.4.17 caps setuptools <81, so this is an override, not a constraint; the
+# memsearch CLI is smoke-checked in tests against the overridden version.
+override-dependencies = ["setuptools>=83.0.0"]
+
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"
