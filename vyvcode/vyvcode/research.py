@@ -118,12 +118,28 @@ class ResearchSession:
     def tsv_path(self) -> Path:
         return self.ar_dir / "results.tsv"
 
-    def save(self) -> None:
+    def save(self, preserve_stop: bool = True) -> None:
+        # A stop flag set by another process (request_stop) must survive our
+        # own saves, or the loop clobbers it and never halts.
+        if preserve_stop and not self.state.get("stop") and self.state_path.is_file():
+            try:
+                disk_stop = json.loads(self.state_path.read_text()).get("stop")
+            except (OSError, json.JSONDecodeError):
+                disk_stop = None
+            if disk_stop:
+                self.state["stop"] = disk_stop
         self.state_path.write_text(json.dumps(self.state, indent=2) + "\n")
 
     def reload(self) -> "ResearchSession":
         self.state = json.loads(self.state_path.read_text())
         return self
+
+    def reload_stop_only(self) -> None:
+        """Pick up a cross-process stop flag without clobbering local state."""
+        try:
+            self.state["stop"] = json.loads(self.state_path.read_text()).get("stop")
+        except (OSError, json.JSONDecodeError):
+            pass
 
     def journal(self, text: str) -> None:
         stamp = _dt.datetime.now(_dt.UTC).strftime("%H:%M")
@@ -691,12 +707,420 @@ def gzip_log(src: Path, dest: Path) -> None:
         shutil.copyfileobj(f_in, f_out)
 
 
-# ── loop / report entry points (B14 / B15) ───────────────────────────────────
+# ── researcher turn (§5.2) ───────────────────────────────────────────────────
+
+REASK_HYPOTHESIS = (
+    "Your last message lacked the required final line. Reply with ONLY the "
+    "line: HYPOTHESIS: <one sentence stating the change and expected effect>"
+)
+
+_HYPOTHESIS_RE = re.compile(r"(?m)^\s*HYPOTHESIS:\s*(.+)$")
+
+GUARD_REPROMPT = (
+    "Harness guard: you modified files other than train.py ({paths}). Those "
+    "changes were reverted. train.py is the ONLY editable file — finish this "
+    "experiment by editing train.py only, then restate your HYPOTHESIS line."
+)
+
+
+def build_context(session: ResearchSession, ar_dir: Path,
+                  crash_tail: str = "") -> str:
+    parts = [
+        "<program_md>\n" + (Path(ar_dir) / "program.md").read_text() + "\n</program_md>",
+        "<results_tsv>\n"
+        + (session.tsv_path.read_text() if session.tsv_path.is_file() else "(empty)")
+        + "</results_tsv>",
+    ]
+    journal = session.journal_tail(3)
+    if journal:
+        parts.append(f"<journal_recent>\n{journal}\n</journal_recent>")
+    if crash_tail:
+        parts.append(f"<last_crash_log_tail>\n{crash_tail}\n</last_crash_log_tail>")
+    parts.append(
+        "<current_train_py>\n" + (Path(ar_dir) / "train.py").read_text()
+        + "\n</current_train_py>"
+    )
+    parts.append(
+        "Implement ONE experiment now by editing train.py in this checkout, "
+        "then end with your HYPOTHESIS line."
+    )
+    return "\n\n".join(parts)
+
+
+def make_researcher(cfg: VyvConfig, ar_dir: Path):
+    """Fresh Conversation per experiment; token spend read from SDK metrics."""
+    from vyvcode.models import llm_for
+    from vyvcode.subagents import agent_prompt, run_agent_task
+
+    def researcher(task: str) -> str:
+        llm = llm_for("researcher", cfg)
+        reply = run_agent_task(
+            llm,
+            system_prompt=agent_prompt("vyvcode-researcher"),
+            task=task,
+            workspace=ar_dir,
+            tools=("terminal", "file_editor", "glob", "grep"),
+            max_iterations=40,
+        )
+        usage = getattr(llm.metrics, "accumulated_token_usage", None)
+        researcher.last_tokens = (
+            (getattr(usage, "prompt_tokens", 0) or 0)
+            + (getattr(usage, "completion_tokens", 0) or 0)
+            if usage is not None else 0
+        )
+        return reply
+
+    researcher.last_tokens = 0
+    return researcher
+
+
+def extract_hypothesis(reply: str) -> str | None:
+    matches = _HYPOTHESIS_RE.findall(reply or "")
+    return matches[-1].strip() if matches else None
+
+
+# ── only-train.py guard (§5.4) ───────────────────────────────────────────────
+
+
+def guard_offenders(ar_dir: Path) -> list[str]:
+    """Every changed/untracked path that isn't train.py (excluded junk aside)."""
+    porcelain = _git(ar_dir, "status", "--porcelain").stdout.splitlines()
+    offenders = []
+    for line in porcelain:
+        path = line[3:].split(" -> ")[-1].strip().strip('"')
+        if path != "train.py":
+            offenders.append(path)
+    return offenders
+
+
+def revert_offenders(ar_dir: Path, offenders: list[str]) -> None:
+    tracked = _git(ar_dir, "ls-files", *offenders, check=False).stdout.split("\n")
+    tracked = [t for t in tracked if t]
+    for path in offenders:
+        if path in tracked:
+            _git(ar_dir, "checkout", "--", path, check=False)
+        else:
+            target = Path(ar_dir) / path
+            if target.is_dir():
+                shutil.rmtree(target, ignore_errors=True)
+            else:
+                target.unlink(missing_ok=True)
+
+
+def _reset_to_best(ar_dir: Path, best_sha: str) -> None:
+    _git(ar_dir, "reset", "--hard", best_sha)
+    _git(ar_dir, "clean", "-fd", check=False)  # respects .git/info/exclude
+
+
+# ── the experiment loop (§5.1) ───────────────────────────────────────────────
+
+
+def _device_total_mb(runner=subprocess.run) -> float | None:
+    try:
+        proc = runner(
+            ["nvidia-smi", "--query-gpu=memory.total", "--format=csv,noheader,nounits"],
+            capture_output=True, text=True, timeout=30, check=False,
+        )
+        if proc.returncode == 0 and proc.stdout.strip():
+            return float(proc.stdout.strip().splitlines()[0])
+    except (OSError, subprocess.TimeoutExpired, ValueError):
+        pass
+    return None
 
 
 def start(cfg: VyvConfig, ar_dir: Path, out=print, max_experiments=None,
-          max_hours=None, freeform: bool = False) -> str:
-    raise ResearchError("loop lands in B14")
+          max_hours=None, freeform: bool = False, researcher_fn=None,
+          strategist_fn=None, train_fn=None, gpu_check=gpu_alive,
+          report_fn=None) -> str:
+    if freeform:
+        return run_freeform(cfg, ar_dir, out=out)
+    session = ResearchSession.latest(ar_dir)
+    if session is None or not session.state.get("baseline"):
+        return "no prepared session (run /vyvcode:autoresearch setup first)"
+    session.reload()
+    session.state["stop"] = None
+    session.save(preserve_stop=False)
+    acquire_lock(ar_dir, session.session_id, out=out)
+    try:
+        run_loop(
+            cfg, ar_dir, session, out=out,
+            max_experiments=max_experiments, max_hours=max_hours,
+            researcher_fn=researcher_fn, strategist_fn=strategist_fn,
+            train_fn=train_fn, gpu_check=gpu_check,
+        )
+    finally:
+        release_lock(ar_dir)
+    closing = finish_session(cfg, ar_dir, session, out=out, report_fn=report_fn)
+    return closing
+
+
+def run_loop(cfg: VyvConfig, ar_dir: Path, session: ResearchSession, out=print,
+             max_experiments=None, max_hours=None, researcher_fn=None,
+             strategist_fn=None, train_fn=None, gpu_check=gpu_alive) -> None:
+    import time as _time
+
+    researcher_fn = researcher_fn or make_researcher(cfg, ar_dir)
+    train_fn = train_fn or (
+        lambda log, on_start: run_training(
+            ar_dir, log, cfg.ar_run_timeout_min, on_start=on_start
+        )
+    )
+    exp_cap = max_experiments if max_experiments is not None else cfg.ar_max_experiments
+    hour_cap = max_hours if max_hours is not None else cfg.ar_max_hours
+    started = _time.monotonic()
+
+    while True:
+        session.reload()
+        if session.state.get("stop"):
+            out(f"stop requested ({session.state['stop']})")
+            break
+        if exp_cap and session.state["counts"]["run"] >= exp_cap:
+            out(f"experiment cap reached ({exp_cap})")
+            break
+        if hour_cap and (_time.monotonic() - started) >= hour_cap * 3600:
+            out(f"wall-clock cap reached ({hour_cap}h)")
+            break
+        if not gpu_check():
+            session.journal("GPU disappeared or reports ERR — loop paused")
+            out("GPU gone/ERR — pausing the loop (fix the device, then start again)")
+            break
+        try:
+            run_experiment(cfg, ar_dir, session, researcher_fn, train_fn, out)
+        except ResearchError:
+            raise
+        except Exception as exc:  # §7.2: overnight resilience
+            best = session.state["best"]
+            _reset_to_best(ar_dir, best["sha"])
+            session.state["counts"]["run"] += 1
+            session.state["counts"]["discarded"] += 1
+            session.save()
+            session.journal(f"harness_error: {redact_exc(cfg, exc)}")
+            session.append_experiment({
+                "ts": _now_iso(), "exp_id": session.next_exp_id(),
+                "decision": "discard", "reason": f"harness_error: {exc}",
+            })
+            out(f"harness error (experiment discarded, loop continues): {exc}")
+            continue
+
+        _maybe_strategist(cfg, session, strategist_fn, out)
+
+
+def redact_exc(cfg: VyvConfig, exc: Exception) -> str:
+    from vyvcode.config import redact
+
+    return redact(str(exc), cfg.secret_values)
+
+
+def _now_iso() -> str:
+    return _dt.datetime.now(_dt.UTC).isoformat(timespec="seconds")
+
+
+def run_experiment(cfg: VyvConfig, ar_dir: Path, session: ResearchSession,
+                   researcher_fn, train_fn, out) -> None:
+    exp_id = session.next_exp_id()
+    best = session.state["best"]
+    crash_tail = session.state.get("last_crash_tail", "") \
+        if session.state.get("crash_streak", 0) > 0 else ""
+
+    # 1 ▸ researcher turn
+    reply = researcher_fn(build_context(session, ar_dir, crash_tail))
+    hypothesis = extract_hypothesis(reply)
+    if hypothesis is None:
+        reply = researcher_fn(REASK_HYPOTHESIS)
+        hypothesis = extract_hypothesis(reply)
+    if hypothesis is None:
+        diff_stat = _git(ar_dir, "diff", "--stat", "HEAD", check=False).stdout.strip()
+        hypothesis = f"synthesized from diff: {diff_stat.splitlines()[-1] if diff_stat else 'no diff'}"
+        session.journal(f"exp {exp_id}: researcher omitted HYPOTHESIS; synthesized")
+
+    # 2 ▸ guard: only train.py
+    offenders = guard_offenders(ar_dir)
+    if offenders:
+        revert_offenders(ar_dir, offenders)
+        session.journal(f"exp {exp_id}: guard_violation ({', '.join(offenders)})")
+        researcher_fn(GUARD_REPROMPT.format(paths=", ".join(offenders)))
+        offenders = guard_offenders(ar_dir)
+        if offenders:
+            revert_offenders(ar_dir, offenders)
+            _reset_to_best(ar_dir, best["sha"])
+            _record(cfg, session, exp_id, sha="-", hypothesis=hypothesis,
+                    result=None, decision="discard", reason="guard violation",
+                    tokens=getattr(researcher_fn, "last_tokens", 0), out=out)
+            return
+
+    if not _git(ar_dir, "diff", "--name-only", "HEAD").stdout.strip():
+        _record(cfg, session, exp_id, sha="-", hypothesis=hypothesis,
+                result=None, decision="discard", reason="no change made",
+                tokens=getattr(researcher_fn, "last_tokens", 0), out=out)
+        return
+
+    # 3 ▸ harness commit + ground-truth run
+    _git(ar_dir, "add", "train.py")
+    _git(ar_dir, "commit", "-m", f"exp {exp_id:03d}: {hypothesis[:120]}")
+    sha = _head_sha(ar_dir)
+
+    def on_start(pgid: int) -> None:
+        session.state["train_pgid"] = pgid
+        session.save()
+
+    log_path = Path(ar_dir) / "run.log"
+    result = train_fn(log_path, on_start)
+    session.state["train_pgid"] = None
+
+    if result.log_path and Path(result.log_path).is_file():
+        gzip_log(Path(result.log_path), session.dir / "logs" / f"exp_{exp_id:03d}.log.gz")
+
+    session.reload_stop_only()
+    if session.state.get("stop") == "now":
+        _reset_to_best(ar_dir, best["sha"])
+        session.journal(f"exp {exp_id}: aborted by stop --now; discarded in flight")
+        session.append_experiment({
+            "ts": _now_iso(), "exp_id": exp_id, "sha": sha,
+            "hypothesis": hypothesis, "decision": "aborted",
+            "reason": "stop --now",
+        })
+        return
+
+    # 4/5 ▸ decide per upstream rules (§5.5)
+    if result.status == "crash":
+        session.state["crash_streak"] += 1
+        session.state["last_crash_tail"] = "\n".join(
+            (Path(result.log_path).read_text(errors="replace").splitlines()[-50:])
+            if result.log_path and Path(result.log_path).is_file() else [result.reason]
+        )
+        _reset_to_best(ar_dir, best["sha"])
+        _record(cfg, session, exp_id, sha, hypothesis, result, "crash",
+                result.reason.splitlines()[0],
+                tokens=getattr(researcher_fn, "last_tokens", 0), out=out)
+        return
+
+    session.state["crash_streak"] = 0
+    session.state["last_crash_tail"] = ""
+    epsilon = cfg.ar_epsilon
+    if result.val_bpb < best["val_bpb"] - epsilon:
+        session.state["best"] = {"sha": sha, "val_bpb": result.val_bpb,
+                                 "exp_id": exp_id}
+        _vram_soft_check(cfg, session, result, exp_id)
+        _record(cfg, session, exp_id, sha, hypothesis, result, "keep", "",
+                tokens=getattr(researcher_fn, "last_tokens", 0), out=out)
+    else:
+        _reset_to_best(ar_dir, best["sha"])
+        _record(cfg, session, exp_id, sha, hypothesis, result, "discard",
+                "equal-or-worse",
+                tokens=getattr(researcher_fn, "last_tokens", 0), out=out)
+
+
+def _vram_soft_check(cfg: VyvConfig, session: ResearchSession, result: TrainResult,
+                     exp_id: int) -> None:
+    total = session.state.get("device_total_mb")
+    if total is None:
+        total = _device_total_mb()
+        session.state["device_total_mb"] = total
+    peak = result.fields.get("peak_vram_mb")
+    if total and peak and peak > 0.95 * total:
+        session.journal(
+            f"exp {exp_id}: kept but peak_vram_mb {peak:.0f} is >95% of device "
+            f"{total:.0f} — soft constraint, flagging for the strategist"
+        )
+
+
+def _record(cfg: VyvConfig, session: ResearchSession, exp_id: int, sha: str,
+            hypothesis: str, result: TrainResult | None, decision: str,
+            reason: str, tokens: int, out=print) -> None:
+    fields = result.fields if result else {}
+    val = fields.get("val_bpb", 0.0) if decision != "crash" else 0.0
+    mem_gb = (
+        fields.get("peak_vram_mb", 0.0) / 1024
+        if result is not None and result.status == "ok" else 0.0
+    )
+    description = hypothesis if decision != "crash" else f"{hypothesis} ({reason})"
+    tsv_append(session.tsv_path, sha, val, mem_gb, decision, description)
+
+    counts = session.state["counts"]
+    counts["run"] += 1
+    key = {"keep": "kept", "discard": "discarded", "crash": "crashed"}[decision]
+    counts[key] += 1
+    session.save()
+
+    session.append_experiment({
+        "ts": _now_iso(), "exp_id": exp_id, "sha": sha, "hypothesis": hypothesis,
+        "val_bpb": fields.get("val_bpb"), "peak_vram_mb": fields.get("peak_vram_mb"),
+        "mfu": fields.get("mfu_percent"), "num_params_M": fields.get("num_params_M"),
+        "decision": decision, "reason": reason, "tokens_spent": tokens,
+    })
+    session.journal(
+        f"exp {exp_id:03d} [{decision}] {hypothesis}"
+        + (f" — {reason}" if reason else "")
+        + (f" — val_bpb {fields['val_bpb']:.6f}" if fields.get("val_bpb") else "")
+    )
+
+    best = session.state["best"]
+    if decision == "keep":
+        line = (f"exp {exp_id:03d} ▸ \"{hypothesis}\" ▸ val_bpb "
+                f"{fields['val_bpb']:.6f} ▸ KEEP (new best)")
+    elif decision == "discard" and fields.get("val_bpb"):
+        delta = fields["val_bpb"] - best["val_bpb"]
+        line = (f"exp {exp_id:03d} ▸ \"{hypothesis}\" ▸ val_bpb "
+                f"{fields['val_bpb']:.6f} (best {best['val_bpb']:.6f}, "
+                f"Δ{delta:+.6f}) ▸ DISCARD")
+    elif decision == "crash":
+        line = f"exp {exp_id:03d} ▸ \"{hypothesis}\" ▸ CRASH ({reason})"
+    else:
+        line = f"exp {exp_id:03d} ▸ \"{hypothesis}\" ▸ DISCARD ({reason})"
+    out(line)
+
+
+def _maybe_strategist(cfg: VyvConfig, session: ResearchSession, strategist_fn,
+                      out) -> None:
+    session.reload()
+    trigger = None
+    if session.state["crash_streak"] >= cfg.ar_crash_streak_limit:
+        trigger = "crash_streak"
+        session.state["crash_streak"] = 0
+        session.save()
+    elif (cfg.ar_strategy_every
+          and session.state["counts"]["run"] > 0
+          and session.state["counts"]["run"] % cfg.ar_strategy_every == 0):
+        trigger = "cadence"
+    if trigger is None:
+        return
+    if strategist_fn is None:
+        strategist_fn = default_strategist_pass
+    try:
+        strategist_fn(cfg, session, trigger, out)
+    except Exception as exc:
+        session.journal(f"strategist pass failed ({trigger}): {redact_exc(cfg, exc)}")
+
+
+def default_strategist_pass(cfg, session, trigger, out) -> None:
+    raise ResearchError("strategist lands in B15")
+
+
+def finish_session(cfg: VyvConfig, ar_dir: Path, session: ResearchSession,
+                   out=print, report_fn=None) -> str:
+    counts = session.reload().state["counts"]
+    return (
+        f"session {session.session_id}: {counts['run']} run / "
+        f"{counts['kept']} kept / {counts['crashed']} crashed"
+    )
+
+
+def run_freeform(cfg: VyvConfig, ar_dir: Path, out=print) -> str:
+    """D12 escape hatch: upstream's freeform style — one researcher session
+    with program.md as context, full tools, no harness loop."""
+    from vyvcode.commands import run_fast_path
+    from vyvcode.models import llm_for
+
+    program = (Path(ar_dir) / "program.md").read_text()
+    out("freeform mode: handing the checkout to the researcher (upstream style)")
+    run_fast_path(
+        cfg,
+        f"You are in an autoresearch checkout. Follow these research org "
+        f"instructions:\n\n{program}",
+        llm=llm_for("researcher", cfg),
+        workspace=ar_dir,
+    )
+    return "freeform session ended"
 
 
 def regenerate_report(cfg: VyvConfig, ar_dir: Path, out=print) -> str:
