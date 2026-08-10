@@ -135,7 +135,8 @@ def run_pipeline(
         out(report_md)
         if run.state == "REPORTING":
             run.to("DONE")
-        memory.write_digest(cfg, run.run_id, report_md)
+        digest = memory.make_digest(cfg, communicator, report_md, goal=optimized)
+        memory.write_digest(cfg, run.run_id, digest, goal=optimized)
         return f"run {run.run_id}: {run.state}"
 
     except PipelineAborted:

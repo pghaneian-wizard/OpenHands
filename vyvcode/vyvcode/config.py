@@ -92,6 +92,8 @@ class VyvConfig:
     coder_max_budget: float | None
     default_mode: str
     memory_enabled: bool
+    memsearch_provider: str = "onnx"
+    memsearch_model: str = "gpahal/bge-m3-onnx-int8"
     secret_values: tuple[str, ...] = field(default=(), repr=False)
 
     @property
@@ -224,6 +226,11 @@ def load_config(
         coder_max_budget=knobs["CODER_MAX_BUDGET"],  # type: ignore[arg-type]
         default_mode=knobs["DEFAULT_MODE"],  # type: ignore[arg-type]
         memory_enabled=_parse_bool(memory_raw),
+        # Empty string = defer to memsearch's own config instead of forcing.
+        memsearch_provider=get_clearable("VYVCODE_MEMSEARCH_PROVIDER", "onnx") or "",
+        memsearch_model=get_clearable(
+            "VYVCODE_MEMSEARCH_MODEL", "gpahal/bge-m3-onnx-int8"
+        ) or "",
         secret_values=secrets,
     )
 

@@ -6,6 +6,7 @@ matching. ``!raw`` bypasses the optimizer entirely.
 
 from __future__ import annotations
 
+import datetime as _dt
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -92,6 +93,14 @@ class Handlers:
             return refusal
         message = text if bypass else self._optimized(text)
         run_fast_path(self.cfg, message)
+        from vyvcode import memory
+
+        stamp = _dt.datetime.now(_dt.UTC).strftime("%Y%m%d_%H%M%S")
+        memory.write_digest(
+            self.cfg, f"fast_{stamp}",
+            f"- fast-path task completed by single coder: {message}",
+            goal=message,
+        )
         return None
 
     def pipeline(self, mode: str, arg: str) -> str | None:

@@ -10,6 +10,7 @@ dependencies = [
     "prompt-toolkit>=3.0.47",
     "tiktoken>=0.8.0",
     "pyyaml>=6.0.1",
+    "memsearch>=0.4.17",
 ]
 
 [project.scripts]
