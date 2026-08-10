@@ -53,7 +53,7 @@ def main(argv: list[str] | None = None) -> int:
     if args.install_assets:
         from vyvcode.installer import install_assets
 
-        for line in install_assets(cfg.project_root):
+        for line in install_assets(cfg):
             print(line)
         return 0
 
