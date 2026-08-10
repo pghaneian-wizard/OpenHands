@@ -110,6 +110,29 @@ class TestScheduler:
         ).stdout.split()
         assert {"core.py", "auth.py", "api.py", "main.py"} <= set(listing)
 
+    def test_build_artifacts_left_by_the_coder_do_not_fail_the_phase(self, repo):
+        # The coder prompt orders it to run its own tests, which drops
+        # __pycache__/ into the worktree. Untracked artifacts are not
+        # uncommitted work, so they must not fail the completion gate.
+        cfg = load_config(repo, env={})
+        run = make_run(cfg)
+        plan = parse_masterplan(
+            HEADER + phase_block("P1", "core", [], ["core.py"],
+                                 "- run: `test -f core.py`")
+        )
+
+        def runner(prompt, worktree, phase_id):
+            (worktree / "core.py").write_text("# P1\n")
+            commit_all(worktree, "P1 work")
+            (worktree / "__pycache__").mkdir()
+            (worktree / "__pycache__" / "core.pyc").write_bytes(b"\x00")
+            write_report(worktree, phase_id)
+            return "done"
+
+        outcome = execute_swarm(cfg, run, plan, out=lambda _: None, coder_runner=runner)
+
+        assert outcome.merged == ["P1"]
+
     def test_dirty_base_tree_refused(self, repo):
         cfg = load_config(repo, env={})
         run = make_run(cfg)

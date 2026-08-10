@@ -82,6 +82,32 @@ class TestWritePath:
         assert "Built X" in digest
 
 
+class TestFailureIsolation:
+    def test_unwritable_memory_dir_does_not_kill_a_finished_run(self, tmp_path):
+        # write_digest runs after the run reaches DONE; an OSError here would
+        # surface an already-successful run to the user as a traceback.
+        cfg = load_config(tmp_path, env={})
+        cfg.memory_dir.parent.mkdir(parents=True)
+        cfg.memory_dir.write_text("a file where the directory should be")
+
+        assert memory.write_digest(cfg, "run_x", "- did a thing", goal="g") is None
+
+    def test_undecodable_subprocess_output_degrades_to_empty(
+        self, tmp_path, monkeypatch
+    ):
+        # A stray non-UTF-8 byte in memsearch's stdout raises
+        # UnicodeDecodeError, which is not an OSError and escaped the handler.
+        cfg = load_config(tmp_path, env={})
+        monkeypatch.setattr(memory, "_memsearch_bin", lambda: "/bin/true")
+
+        def boom(*a, **k):
+            raise UnicodeDecodeError("utf-8", b"\xe9", 0, 1, "invalid start byte")
+
+        monkeypatch.setattr(memory.subprocess, "run", boom)
+
+        assert memory.search(cfg, "anything") == []
+
+
 class TestReadPath:
     CHUNK = {
         "score": 0.9,

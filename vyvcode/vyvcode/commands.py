@@ -135,6 +135,10 @@ class Handlers:
         return run_pipeline(self.cfg, mode=mode, raw_text=arg)
 
     def grill(self, arg: str) -> str | None:
+        # Drives the communicator plus the coder-backed NEEDS-FACT explorer.
+        refusal = self._require_roles({"communicator", "coder"})
+        if refusal:
+            return refusal
         from vyvcode.grill import standalone
 
         return standalone(self.cfg, self._optimized(arg))

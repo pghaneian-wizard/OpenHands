@@ -1,5 +1,8 @@
 """State machine: transitions, persistence, abort, status rendering."""
 
+import json
+import os
+
 import pytest
 
 from vyvcode.run_state import (
@@ -7,6 +10,7 @@ from vyvcode.run_state import (
     StateError,
     abort_active,
     active_run,
+    all_runs,
     new_run_id,
     render_status,
 )
@@ -43,6 +47,21 @@ class TestStateMachine:
         with pytest.raises(StateError):
             run.to("ABORTED")
 
+    def test_phase_update_never_resurrects_a_run_aborted_elsewhere(self, tmp_path):
+        # /vyvcode:stop runs in a second process while the swarm keeps writing
+        # phase rows; the swarm's whole-document save must not undo the abort.
+        swarm_view = Run(tmp_path, "long build")
+        swarm_view.to("GRILL")
+        swarm_view.to("BRIEF")
+        swarm_view.to("PLANNING")
+        swarm_view.to("EXECUTING")
+
+        Run.load(swarm_view.dir).to("ABORTED")  # the other process
+        swarm_view.set_phase("P1", status="MERGED")
+
+        assert Run.load(swarm_view.dir).state == "ABORTED"
+        assert swarm_view.is_aborted
+
     def test_is_aborted_seen_across_instances(self, tmp_path):
         run = Run(tmp_path, "x")
         other = Run.load(run.dir)
@@ -72,6 +91,47 @@ class TestHelpers:
         live.to("GRILL")
 
         assert active_run(tmp_path).run_id == live.run_id
+
+    def test_corrupt_state_file_does_not_brick_the_dispatcher(self, tmp_path):
+        good = Run(tmp_path, "healthy")
+        good.to("GRILL")
+        good.to("BRIEF")
+        broken = tmp_path / "run_29990101_000000_broken"
+        broken.mkdir()
+        (broken / "state.json").write_text("{ truncated", encoding="utf-8")
+
+        # A half-written state.json must not take down status/stop/pipeline.
+        assert [r.run_id for r in all_runs(tmp_path)] == [good.run_id]
+        assert render_status(tmp_path) == f"{good.run_id}: BRIEF"
+        assert abort_active(tmp_path) == good.run_id
+
+    def test_save_is_atomic_leaving_no_partial_file(self, tmp_path):
+        run = Run(tmp_path, "atomic")
+        run.to("GRILL")
+
+        leftovers = [p.name for p in run.dir.iterdir() if p.name != "state.json"]
+
+        assert json.loads(run.state_path.read_text(encoding="utf-8"))["state"] == "GRILL"
+        assert not [n for n in leftovers if n.startswith("state.json")]
+
+    def test_reboot_makes_a_recycled_pid_count_as_dead(self, tmp_path):
+        stale = Run(tmp_path, "survived a reboot")
+        stale.to("GRILL")
+        stale._data["pid"] = os.getpid()  # pid now belongs to an unrelated process
+        stale._data["boot"] = "0000-boot-id-from-a-previous-boot"
+        stale._save()
+
+        assert active_run(tmp_path) is None
+
+    def test_two_runs_in_the_same_second_get_distinct_ids(self, tmp_path):
+        first = Run(tmp_path, "same goal text")
+        first.to("GRILL")
+
+        second = Run(tmp_path, "same goal text")
+
+        assert second.run_id != first.run_id
+        assert second.state == "IDLE"
+        assert first.reload().state == "GRILL"
 
     def test_active_run_clears_run_whose_process_died(self, tmp_path):
         crashed = Run(tmp_path, "crashy")

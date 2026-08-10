@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import re
 
-from vyvcode.config import VyvConfig
+from vyvcode.config import VyvConfig, redact
 
 
 def _brief_field(brief_md: str, key: str) -> str:
@@ -118,4 +118,6 @@ def render_report(cfg: VyvConfig, run, plan, swarm_outcome, review_outcome) -> s
     if cfg.memory_enabled:
         lines += ["- memory: digest appended to .memsearch/memory/ (today's file)"]
     lines += [""]
-    return "\n".join(lines)
+    # The report is printed and written to disk, and its inputs (BRIEF fields,
+    # phase notes, suite output) are model- or command-authored.
+    return redact("\n".join(lines), cfg.secret_values)

@@ -130,7 +130,11 @@ class ResearchSession:
                 disk_stop = None
             if disk_stop:
                 self.state["stop"] = disk_stop
-        self.state_path.write_text(json.dumps(self.state, indent=2) + "\n")
+        # Write-then-rename: an overnight session killed mid-write would leave
+        # a truncated state.json that breaks status, stop, and report for good.
+        tmp = self.state_path.with_name(".state.json.tmp")
+        tmp.write_text(json.dumps(self.state, indent=2) + "\n", encoding="utf-8")
+        os.replace(tmp, self.state_path)
 
     def reload(self) -> "ResearchSession":
         self.state = json.loads(self.state_path.read_text())
@@ -644,6 +648,13 @@ def dispatch(cfg: VyvConfig, arg: str, out=print, ask_user=None) -> str:
         args = _build_parser().parse_args(arg.split())
     except argparse.ArgumentError as exc:
         return f"autoresearch: {exc}. Subcommands: setup start status stop report"
+    except SystemExit:
+        # exit_on_error=False does not cover unrecognized arguments; argparse
+        # calls error() -> SystemExit, which would tear down the REPL.
+        return (
+            f"autoresearch: unrecognized arguments in {arg!r}. "
+            "Subcommands: setup start status stop report"
+        )
     if args.cmd is None:
         return "autoresearch subcommands: setup [--dir PATH] | start [--experiments N] [--hours H] [--freeform] | status | stop [--now] | report"
 

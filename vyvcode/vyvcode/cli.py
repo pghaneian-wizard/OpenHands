@@ -48,9 +48,13 @@ def main(argv: list[str] | None = None) -> int:
     silence_sdk_noise()  # must precede SDK imports: LOG_LEVEL is read at import time
     args = build_parser().parse_args(argv)
 
-    from vyvcode.config import load_config
+    from vyvcode.config import ConfigError, load_config
 
-    cfg = load_config(args.project)
+    try:
+        cfg = load_config(args.project)
+    except ConfigError as exc:
+        print(f"config error: {exc}", file=sys.stderr)
+        return 2
 
     if args.probe:
         from vyvcode.models import render_probe_table, run_probe

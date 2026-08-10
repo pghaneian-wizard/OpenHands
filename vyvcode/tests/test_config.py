@@ -2,7 +2,9 @@
 
 from pathlib import Path
 
-from vyvcode.config import REDACTED, load_config, redact
+import pytest
+
+from vyvcode.config import REDACTED, ConfigError, load_config, redact
 
 
 def _write(path: Path, text: str) -> None:
@@ -37,6 +39,15 @@ class TestPrecedence:
         assert cfg.roles["coder"].model == "from-env"
         assert cfg.roles["reviewer"].model == "toml-reviewer"
         assert cfg.max_review_cycles == 9
+
+    def test_unusable_knob_values_raise_config_error_naming_the_var(self, tmp_path):
+        for value in ("0", "-1", "four"):
+            with pytest.raises(ConfigError, match="VYVCODE_MAX_PARALLEL_CODERS"):
+                load_config(tmp_path, env={"VYVCODE_MAX_PARALLEL_CODERS": value})
+
+    def test_bad_float_knob_raises_config_error(self, tmp_path):
+        with pytest.raises(ConfigError, match="VYVCODE_AR_MAX_HOURS"):
+            load_config(tmp_path, env={"VYVCODE_AR_MAX_HOURS": "overnight"})
 
     def test_dotenv_empty_value_with_inline_comment_is_unset(self, tmp_path):
         # python-dotenv keeps the comment as the value when the value is empty:

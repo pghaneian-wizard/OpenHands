@@ -21,7 +21,10 @@ from vyvcode.subagents import READ_ONLY_TOOLS, agent_prompt, run_agent_task
 
 _PHASE_HEADING = re.compile(r"(?m)^## Phase\s+([A-Za-z0-9_\-]+)\s*:\s*(.*)$")
 _YAML_FENCE = re.compile(r"```yaml\s*\n(.*?)```", re.S)
-_ACCEPTANCE_RUN = re.compile(r"-\s*run:\s*`([^`]+)`")
+_SAFE_PHASE_ID = re.compile(r"[A-Za-z0-9_\-]{1,40}")
+# Anchored to the start of a list item: these commands are executed, so a
+# sentence merely quoting one ("do NOT - run: `rm -rf /`") is not a command.
+_ACCEPTANCE_RUN = re.compile(r"(?m)^\s*-\s*run:\s*`([^`]+)`")
 
 
 class PlanValidationError(Exception):
@@ -85,6 +88,13 @@ def parse_masterplan(text: str) -> MasterPlan:
         if not phase_id:
             errors.append(f"phase {label}: yaml block lacks 'id'")
             continue
+        if not _SAFE_PHASE_ID.fullmatch(phase_id):
+            # The id is used as a path component for the phase worktree and
+            # the per-phase artifact directory, so it must stay a plain name.
+            errors.append(
+                f"phase {label}: id {phase_id!r} must match {_SAFE_PHASE_ID.pattern}"
+            )
+            continue
         if phase_id in phases:
             errors.append(f"duplicate phase id {phase_id}")
             continue
@@ -134,10 +144,10 @@ def parse_masterplan(text: str) -> MasterPlan:
 
 
 def _topo_sort(phases: dict[str, Phase], errors: list[str]) -> list[str]:
-    indegree = {pid: 0 for pid in phases}
-    for phase in phases.values():
-        for dep in phase.depends_on:
-            indegree[phase.id] += 1
+    # Count distinct dependencies: the resolution step below decrements once
+    # per dependency, so a repeated entry would leave a phantom indegree and
+    # be reported as a dependency cycle.
+    indegree = {pid: len(set(phase.depends_on)) for pid, phase in phases.items()}
     ready = sorted(pid for pid, deg in indegree.items() if deg == 0)
     order: list[str] = []
     while ready:

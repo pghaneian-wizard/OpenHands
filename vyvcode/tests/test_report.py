@@ -59,6 +59,25 @@ def synthetic_env(tmp_path):
     return cfg, run, plan, swarm, review
 
 
+class TestRedaction:
+    def test_secret_carried_in_the_brief_never_reaches_the_report(
+        self, tmp_path
+    ):
+        # The BRIEF is model-authored from an interview whose explorer reads
+        # the repo, so a key can ride in from a .env the explorer opened. The
+        # report is written to disk and printed to the terminal.
+        cfg, run, plan, swarm, review = synthetic_env(tmp_path)
+        (run.dir / "BRIEF.md").write_text(
+            BRIEF.replace("goal: build a todo CLI",
+                          "goal: ship with OPENAI_API_KEY=sk-live-abc123def456"),
+            encoding="utf-8",
+        )
+
+        report = render_report(cfg, run, plan, swarm, review)
+
+        assert "sk-live-abc123def456" not in report
+
+
 class TestReport:
     def test_report_matches_golden_fixture(self, tmp_path):
         cfg, run, plan, swarm, review = synthetic_env(tmp_path)

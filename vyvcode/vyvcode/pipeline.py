@@ -49,17 +49,20 @@ def run_pipeline(
     ask_user = ask_user or (lambda: input("answers> "))
     raw_text = redact(raw_text, cfg.secret_values)  # never toward a model or disk
     run = Run(cfg.runs_dir, raw_text or mode)
-    (run.dir / "input.raw.md").write_text(raw_text + "\n")
-
-    communicator = communicator or llm_for("communicator", cfg)
-    optimized = optimize(raw_text, communicator, cfg).text
-    (run.dir / "input.opt.md").write_text(optimized + "\n")
 
     def check_abort() -> None:
         if run.is_aborted:
             raise PipelineAborted(run.run_id)
 
+    # Everything past the run's creation lives in the try: a failure before the
+    # first transition would otherwise strand the run in IDLE, where it blocks
+    # every later pipeline command until the process exits.
     try:
+        (run.dir / "input.raw.md").write_text(raw_text + "\n", encoding="utf-8")
+        communicator = communicator or llm_for("communicator", cfg)
+        optimized = optimize(raw_text, communicator, cfg).text
+        (run.dir / "input.opt.md").write_text(optimized + "\n", encoding="utf-8")
+
         # ── grill ────────────────────────────────────────────────────────
         run.to("GRILL")
         seed = "\n\n".join(
@@ -75,14 +78,16 @@ def run_pipeline(
             cfg, communicator, seed, mode=mode, ask_user=ask_user, out=out,
             explorer=explorer, rounds_cap=_cap_for(cfg, mode),
         )
-        (run.dir / "grill.md").write_text(grill_result.transcript + "\n")
-        (run.dir / "BRIEF.md").write_text(grill_result.brief_md)
+        (run.dir / "grill.md").write_text(
+            grill_result.transcript + "\n", encoding="utf-8"
+        )
+        (run.dir / "BRIEF.md").write_text(grill_result.brief_md, encoding="utf-8")
         if grill_result.spec_md:
             specs = cfg.project_root / "docs" / "vyvcode" / "specs"
             specs.mkdir(parents=True, exist_ok=True)
             date = _dt.datetime.now(_dt.UTC).strftime("%Y-%m-%d")
             (specs / f"{date}-{slugify(raw_text)}-design.md").write_text(
-                grill_result.spec_md
+                grill_result.spec_md, encoding="utf-8"
             )
         run.to("BRIEF")
         check_abort()
@@ -132,7 +137,7 @@ def run_pipeline(
         if report_fn is None:
             from vyvcode.report import render_report as report_fn  # noqa: PLW0127
         report_md = report_fn(cfg, run, plan, swarm_outcome, review_outcome)
-        (run.dir / "report.md").write_text(report_md)
+        (run.dir / "report.md").write_text(report_md, encoding="utf-8")
         out(report_md)
         if run.state == "REPORTING":
             run.to("DONE")

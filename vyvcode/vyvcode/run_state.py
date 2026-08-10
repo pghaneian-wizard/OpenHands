@@ -14,6 +14,7 @@ import datetime as _dt
 import json
 import os
 import re
+from collections.abc import Mapping
 from pathlib import Path
 
 STATES = (
@@ -65,30 +66,63 @@ def new_run_id(goal_text: str) -> str:
     return f"run_{_now()}_{slugify(goal_text)}"
 
 
+def _unique_run_id(runs_dir: Path, goal_text: str) -> str:
+    """A run id no existing run owns.
+
+    Ids carry a whole-second timestamp, so two runs started in the same second
+    with the same goal collide; without this the second run would adopt the
+    first one's state.json and its finished state.
+    """
+    base = new_run_id(goal_text)
+    candidate, suffix = base, 1
+    while (runs_dir / candidate / "state.json").is_file():
+        suffix += 1
+        candidate = f"{base}-{suffix}"
+    return candidate
+
+
+def _boot_id() -> str:
+    """Identifier of the current boot; empty when the platform has none."""
+    try:
+        return Path("/proc/sys/kernel/random/boot_id").read_text(
+            encoding="utf-8"
+        ).strip()
+    except OSError:
+        return ""
+
+
 class Run:
     """One pipeline run: its directory, persisted state, phase table, cycles."""
 
     def __init__(self, runs_dir: Path, goal_text: str = "", run_id: str | None = None):
-        self.run_id = run_id or new_run_id(goal_text)
-        self.dir = Path(runs_dir) / self.run_id
+        runs_dir = Path(runs_dir)
+        if run_id is None:
+            run_id = _unique_run_id(runs_dir, goal_text)
+        self.run_id = run_id
+        self.dir = runs_dir / self.run_id
+        if self.state_path.is_file():
+            self._data = json.loads(
+                self.state_path.read_text(encoding="utf-8")
+            )
+            return
         self.dir.mkdir(parents=True, exist_ok=True)
         (self.dir / "phases").mkdir(exist_ok=True)
         (self.dir / "review").mkdir(exist_ok=True)
-        if self.state_path.is_file():
-            self._data = json.loads(self.state_path.read_text())
-        else:
-            self._data = {
-                "run_id": self.run_id,
-                "state": "IDLE",
-                "pid": os.getpid(),  # owner process; active_run checks liveness
-                "goal": goal_text,
-                "created": _dt.datetime.now(_dt.UTC).isoformat(timespec="seconds"),
-                "updated": None,
-                "phases": {},
-                "review_cycle": 0,
-                "history": [],
-            }
-            self._save()
+        self._data = {
+            "run_id": self.run_id,
+            "state": "IDLE",
+            # Owner process; active_run checks liveness. The boot id makes a
+            # recycled pid after a reboot read as dead rather than alive.
+            "pid": os.getpid(),
+            "boot": _boot_id(),
+            "goal": goal_text,
+            "created": _dt.datetime.now(_dt.UTC).isoformat(timespec="seconds"),
+            "updated": None,
+            "phases": {},
+            "review_cycle": 0,
+            "history": [],
+        }
+        self._save()
 
     # ── persistence ──────────────────────────────────────────────────────
 
@@ -97,11 +131,19 @@ class Run:
         return self.dir / "state.json"
 
     def _save(self) -> None:
+        # This writes the whole document, so a stale in-memory state would undo
+        # an abort written by another process (/vyvcode:stop). An abort wins.
+        if self._data["state"] != "ABORTED" and self._disk_state() == "ABORTED":
+            self._data["state"] = "ABORTED"
         self._data["updated"] = _dt.datetime.now(_dt.UTC).isoformat(timespec="seconds")
-        self.state_path.write_text(json.dumps(self._data, indent=2) + "\n")
+        # Write-then-rename: a crash mid-write must never leave a truncated
+        # state.json behind, which would be unparseable forever after.
+        tmp = self.state_path.with_name(f".{self.state_path.name}.tmp")
+        tmp.write_text(json.dumps(self._data, indent=2) + "\n", encoding="utf-8")
+        os.replace(tmp, self.state_path)
 
     def reload(self) -> "Run":
-        self._data = json.loads(self.state_path.read_text())
+        self._data = json.loads(self.state_path.read_text(encoding="utf-8"))
         return self
 
     @classmethod
@@ -131,13 +173,16 @@ class Run:
         )
         self._save()
 
+    def _disk_state(self) -> str | None:
+        try:
+            return json.loads(self.state_path.read_text(encoding="utf-8"))["state"]
+        except (OSError, ValueError, KeyError):
+            return None
+
     @property
     def is_aborted(self) -> bool:
         """Re-reads disk so an abort from another process is seen mid-run."""
-        try:
-            return json.loads(self.state_path.read_text())["state"] == "ABORTED"
-        except (OSError, json.JSONDecodeError, KeyError):
-            return False
+        return self._disk_state() == "ABORTED"
 
     # ── phase table + review cycles ──────────────────────────────────────
 
@@ -182,7 +227,13 @@ def all_runs(runs_dir: Path) -> list[Run]:
         (d for d in runs_dir.iterdir() if (d / "state.json").is_file()),
         key=lambda d: d.name,
     )
-    return [Run.load(d) for d in dirs]
+    runs = []
+    for d in dirs:
+        try:
+            runs.append(Run.load(d))
+        except (OSError, ValueError, KeyError):
+            continue  # unreadable run: skip it rather than break every command
+    return runs
 
 
 def latest_run(runs_dir: Path) -> Run | None:
@@ -190,7 +241,12 @@ def latest_run(runs_dir: Path) -> Run | None:
     return runs[-1] if runs else None
 
 
-def _pid_alive(pid) -> bool:
+def _owner_alive(data: Mapping) -> bool:
+    """Is the process that started this run still running?"""
+    boot, current_boot = data.get("boot"), _boot_id()
+    if current_boot and boot is not None and boot != current_boot:
+        return False  # different boot: the pid means nothing now
+    pid = data.get("pid")
     if not isinstance(pid, int) or pid <= 0:
         return False
     try:
@@ -211,7 +267,7 @@ def active_run(runs_dir: Path) -> Run | None:
     run = latest_run(runs_dir)
     if run is None or run.state in TERMINAL_STATES:
         return None
-    if not _pid_alive(run._data.get("pid")):
+    if not _owner_alive(run._data):
         run.to("ABORTED")
         return None
     return run

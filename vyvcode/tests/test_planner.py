@@ -73,6 +73,33 @@ class TestParser:
 
         assert any("cycle" in e for e in exc.value.errors)
 
+    def test_repeated_dependency_is_not_a_cycle(self):
+        # Indegree counted every element of depends_on but was decremented once
+        # per resolved dependency, so a duplicate stalled the topological sort
+        # and the plan was rejected for a cycle that does not exist.
+        text = (
+            HEADER
+            + phase_block("P1", "a", [], ["a.py"])
+            + phase_block("P2", "b", ["P1", "P1"], ["b.py"])
+        )
+
+        plan = parse_masterplan(text)
+
+        assert plan.order == ["P1", "P2"]
+
+    def test_run_command_in_prose_is_not_an_acceptance_command(self):
+        # Acceptance commands are executed with shell=True; only real list
+        # items may become one, never a phrase quoting a command mid-sentence.
+        prose = (
+            "Do NOT - run: `rm -rf /tmp/wipe-me` under any circumstances.\n"
+            "- run: `true` → expect: exit 0\n"
+        )
+        text = HEADER + phase_block("P1", "a", [], ["a.py"], acceptance=prose)
+
+        plan = parse_masterplan(text)
+
+        assert plan.phases["P1"].acceptance == ["true"]
+
     def test_parallel_phases_sharing_files_rejected(self):
         text = (
             HEADER
@@ -104,6 +131,17 @@ class TestParser:
             parse_masterplan(text)
 
         assert any("Acceptance" in e for e in exc.value.errors)
+
+    def test_phase_id_escaping_the_run_directory_rejected(self):
+        # The phase id becomes a path component for the worktree and the
+        # per-phase artifact directory, so it must not be able to climb out.
+        block = phase_block("P1", "a", [], ["a.py"]).replace("id: P1", "id: ../../out")
+        text = HEADER + block
+
+        with pytest.raises(PlanValidationError) as exc:
+            parse_masterplan(text)
+
+        assert any("id" in e for e in exc.value.errors)
 
     def test_est_files_escaping_repo_rejected(self):
         text = HEADER + phase_block("P1", "core", [], ["../evil.py"])

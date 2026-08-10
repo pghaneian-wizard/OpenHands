@@ -137,6 +137,16 @@ class TestGuards:
         assert message.startswith("refused")
         assert "communicator" in message
 
+    def test_grill_refused_when_communicator_dead(self, tmp_path):
+        # /vyvcode:grill drives the communicator and the coder-backed explorer,
+        # so it must gate on the same probe result the fast path does.
+        handlers = Handlers(load_config(tmp_path, env={}), alive={"coder"})
+
+        message = handlers.grill("some topic")
+
+        assert "refused" in message
+        assert "communicator" in message
+
     def test_pipeline_refused_when_any_role_dead(self, tmp_path):
         cfg = load_config(tmp_path, env={})
         handlers = Handlers(cfg, alive={"communicator", "coder"})

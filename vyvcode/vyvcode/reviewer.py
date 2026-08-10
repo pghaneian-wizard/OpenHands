@@ -104,10 +104,20 @@ def parse_verdict(text: str) -> Verdict:
         data = json.loads(blocks[0])
     except json.JSONDecodeError as exc:
         raise VerdictError(f"verdict json unparseable: {exc}") from exc
+    # Every shape below is a VerdictError, never a raw TypeError: the review
+    # loop only retries on VerdictError, and anything else kills a run that
+    # already paid for the grill, the plan, and the whole swarm.
+    if not isinstance(data, dict):
+        raise VerdictError(f"verdict json must be an object, got {type(data).__name__}")
     if data.get("verdict") not in ("APPROVED", "CHANGES_REQUIRED"):
         raise VerdictError(f"invalid verdict value: {data.get('verdict')!r}")
+    raw_issues = data.get("issues") or []
+    if not isinstance(raw_issues, list):
+        raise VerdictError(f"issues must be a list, got {type(raw_issues).__name__}")
     issues = []
-    for raw in data.get("issues", []):
+    for raw in raw_issues:
+        if not isinstance(raw, dict):
+            raise VerdictError(f"each issue must be an object, got {raw!r}")
         severity = raw.get("severity")
         if severity not in _SEVERITIES:
             raise VerdictError(f"invalid severity: {severity!r}")
@@ -117,13 +127,26 @@ def parse_verdict(text: str) -> Verdict:
                 severity=severity,
                 problem=str(raw.get("problem", "")),
                 phase=str(raw.get("phase", "")),
-                files=[str(f) for f in raw.get("files", [])],
+                files=_file_list(raw.get("files")),
                 required_fix=str(raw.get("required_fix", "")),
             )
         )
-    return Verdict(
-        verdict=data["verdict"], cycle=int(data.get("cycle", 0)), issues=issues
-    )
+    try:
+        cycle = int(data.get("cycle", 0))
+    except (TypeError, ValueError):
+        raise VerdictError(f"cycle must be a number, got {data.get('cycle')!r}") from None
+    return Verdict(verdict=data["verdict"], cycle=cycle, issues=issues)
+
+
+def _file_list(raw) -> list[str]:
+    """A bare string is one path, not a list of characters."""
+    if raw is None:
+        return []
+    if isinstance(raw, str):
+        return [raw]
+    if not isinstance(raw, list):
+        raise VerdictError(f"files must be a list, got {type(raw).__name__}")
+    return [str(f) for f in raw]
 
 
 def _synthetic(cycle: int, problem: str) -> Verdict:
@@ -308,7 +331,10 @@ def review_loop(
             ) + "\n"
         )
 
-        suite_green = all(r["passed"] for r in suite)
+        # An empty suite is not a green suite: with nothing merged there are no
+        # acceptance commands, and all([]) would approve a run in which every
+        # single phase died, without executing one command.
+        suite_green = bool(suite) and all(r["passed"] for r in suite)
         if verdict.verdict == "APPROVED" and not verdict.blocking and suite_green:
             out(f"Review cycle {cycle}: APPROVED, full suite green")
             return ReviewOutcome(
@@ -318,7 +344,12 @@ def review_loop(
 
         work = list(verdict.blocking)
         if verdict.verdict == "APPROVED" and not verdict.blocking and not suite_green:
-            work = _synthetic(cycle, "reviewer approved but the full suite is red").issues
+            problem = (
+                "reviewer approved but no acceptance command ran at all"
+                if not suite
+                else "reviewer approved but the full suite is red"
+            )
+            work = _synthetic(cycle, problem).issues
             history[-1] = Verdict(
                 verdict="CHANGES_REQUIRED", cycle=cycle,
                 issues=verdict.issues + work, synthetic=True,

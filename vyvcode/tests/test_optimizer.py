@@ -57,6 +57,18 @@ class TestProtection:
         assert "MY_VAR" not in protected
         assert "keep thsi exactly" not in protected
 
+    def test_tenth_and_later_placeholders_are_not_reprotected(self):
+        # ⟦V10⟧ and up contain an ALL-CAPS-looking token ("V10"), so the
+        # ALL-CAPS pattern used to stash the placeholders themselves — the
+        # protected span was then restored as the literal text "V10".
+        raw = "update " + " ".join(f"src/mod{i}/file{i}.py" for i in range(14))
+
+        protected, spans = protect(raw)
+
+        assert "⟦⟦" not in protected
+        assert all(key in protected for key in spans)
+        assert restore(protected, spans) == raw
+
     def test_code_fence_survives_byte_identical_while_prose_is_fixed(self, cfg):
         raw = f"please plese fix teh function below\n{FENCE}\nthanks so mcuh"
         llm = FakeLLM(

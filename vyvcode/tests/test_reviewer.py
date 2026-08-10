@@ -71,6 +71,30 @@ class TestParseVerdict:
         with pytest.raises(VerdictError, match="final content"):
             parse_verdict(text)
 
+    @pytest.mark.parametrize(
+        "body",
+        [
+            '{"verdict": "APPROVED", "cycle": "one", "issues": []}',
+            '{"verdict": "APPROVED", "cycle": 1, "issues": "none"}',
+            "[1, 2]",
+        ],
+    )
+    def test_malformed_shapes_raise_verdict_error_not_a_crash(self, body):
+        # Only VerdictError is caught by the review loop's re-emit path; any
+        # other exception kills a run that already paid for grill+plan+swarm.
+        with pytest.raises(VerdictError):
+            parse_verdict(f"```json\n{body}\n```")
+
+    def test_null_issues_reads_as_no_issues(self):
+        # A common serialization of "nothing to report"; rejecting it would
+        # burn a re-emit cycle and then fabricate a synthetic blocker.
+        verdict = parse_verdict(
+            '```json\n{"verdict": "APPROVED", "cycle": 1, "issues": null}\n```'
+        )
+
+        assert verdict.verdict == "APPROVED"
+        assert verdict.issues == []
+
     def test_bad_severity_rejected(self):
         with pytest.raises(VerdictError, match="severity"):
             parse_verdict(verdict_json("APPROVED", [issue("R1", "catastrophic")]))
@@ -94,6 +118,22 @@ class TestClustering:
 
 
 class TestLoop:
+    def test_run_where_every_phase_died_is_not_approved_on_an_empty_suite(self, env):
+        # With nothing merged there are no acceptance commands, and all([])
+        # is True — a run in which every phase failed used to be reported as
+        # a clean success with zero commands executed.
+        cfg, run, plan, swarm = env
+        swarm.phases["P1"] = PhaseOutcome(phase_id="P1", status="RETRY_EXHAUSTED")
+
+        outcome = review_loop(
+            cfg, run, plan, swarm, out=lambda _: None,
+            reviewer_runner=lambda prompt: verdict_json("APPROVED", [], cycle=1),
+            fix_runner=lambda prompt, cid: "fixed",
+            suite_runner=lambda: [],
+        )
+
+        assert outcome.approved is False
+
     def test_two_changes_required_then_approved_drives_two_fix_waves(self, env):
         cfg, run, plan, swarm = env
         reviews = [

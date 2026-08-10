@@ -196,7 +196,12 @@ def verify_phase(worktree: Path, phase) -> tuple[bool, PhaseOutcome]:
         outcome.notes.append(f"report status: {outcome.report.get('status')}")
         return False, outcome
 
-    porcelain = _git(worktree, "status", "--porcelain").stdout.splitlines()
+    # Tracked changes only: the coder is told to run its own tests, so the
+    # worktree legitimately holds untracked build artifacts (__pycache__/,
+    # .pytest_cache/, coverage files). Those are not uncommitted work.
+    porcelain = _git(
+        worktree, "status", "--porcelain", "--untracked-files=no"
+    ).stdout.splitlines()
     stray = [line for line in porcelain if not line.endswith("PHASE_REPORT.json")]
     if stray:
         outcome.notes.append("worktree not committed clean: " + "; ".join(stray[:5]))
@@ -323,9 +328,10 @@ def _merge_phase(
     if merge.returncode == 0:
         return True
 
+    # One path per line: splitting on whitespace shreds paths containing spaces.
     conflicted = _git(
         integration_dir, "diff", "--name-only", "--diff-filter=U"
-    ).stdout.split()
+    ).stdout.splitlines()
     if not conflicted:  # not a content conflict — surface the real error
         outcome.notes.append(f"merge failed: {merge.stderr.strip()}")
         _git(integration_dir, "merge", "--abort", check=False)

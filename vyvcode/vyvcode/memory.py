@@ -61,7 +61,9 @@ def _memsearch(cfg: VyvConfig, *args: str, timeout: int = 300) -> tuple[int, str
             timeout=timeout, check=False,
         )
         return proc.returncode, proc.stdout if proc.returncode == 0 else proc.stderr
-    except (OSError, subprocess.TimeoutExpired) as exc:
+    except (OSError, ValueError, subprocess.TimeoutExpired) as exc:
+        # ValueError covers UnicodeDecodeError: text=True decodes strictly, so
+        # one stray byte in memsearch's output would otherwise kill the run.
         return 1, str(exc)
 
 
@@ -98,8 +100,6 @@ def write_digest(
     if not cfg.memory_enabled:
         return None
     now = _dt.datetime.now(_dt.UTC)
-    cfg.memory_dir.mkdir(parents=True, exist_ok=True)
-    path = cfg.memory_dir / f"{now:%Y-%m-%d}.md"
     goal_line = redact(goal.splitlines()[0][:120] if goal else run_id,
                        cfg.secret_values)
     entry = (
@@ -107,8 +107,15 @@ def write_digest(
         f"## {now:%H:%M} {run_id} — {goal_line}\n"
         f"{redact(digest_md, cfg.secret_values).strip()}\n"
     )
-    with open(path, "a", encoding="utf-8") as f:
-        f.write(entry)
+    # Called after the run has already succeeded: a read-only project dir or a
+    # clobbered .memsearch path must not turn a finished run into a traceback.
+    try:
+        cfg.memory_dir.mkdir(parents=True, exist_ok=True)
+        path = cfg.memory_dir / f"{now:%Y-%m-%d}.md"
+        with open(path, "a", encoding="utf-8") as f:
+            f.write(entry)
+    except OSError:
+        return None
     index(cfg)
     return path
 

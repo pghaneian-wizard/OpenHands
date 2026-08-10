@@ -79,6 +79,55 @@ class TestGrillLoop:
         assert "FACT (does the repo already have a database dependency?)" in fact_round
         assert "## explorer" in result.transcript
 
+    def test_explorer_findings_and_answers_are_redacted(self, cfg):
+        # The explorer is a real agent with terminal access: a NEEDS-FACT about
+        # configuration makes it read .env. Whatever it returns is re-sent to
+        # the provider every round and written to the transcript on disk.
+        llm = ScriptedChatLLM([ROUND_1, TERMINAL])
+
+        result = run_grill(
+            cfg,
+            llm,
+            "seed",
+            mode="goal",
+            ask_user=lambda: "my key is sk-answerLEAK12345",
+            out=lambda _: None,
+            explorer=lambda q: "found OPENAI_API_KEY=sk-exploreLEAK12345 in .env",
+        )
+
+        sent_to_provider = "\n".join(
+            c.text
+            for message in llm.histories[-1]
+            for c in message.content
+            if getattr(c, "text", None)
+        )
+        assert "sk-exploreLEAK12345" not in result.transcript
+        assert "sk-answerLEAK12345" not in result.transcript
+        assert "sk-exploreLEAK12345" not in sent_to_provider
+        assert "sk-answerLEAK12345" not in sent_to_provider
+
+    def test_reply_merely_quoting_the_terminal_marker_is_not_terminal(self, cfg):
+        # The harness's own nudge text contains FRONTIER-EMPTY; a model that
+        # echoes it while still asking questions used to end the interview and
+        # then die in _extract_terminal, discarding every answered round.
+        echo = (
+            "Understood — I will send FRONTIER-EMPTY once the frontier is clear.\n\n"
+            "❓ **Q1** - **Storage**: sqlite or postgres?\n\n➡️ sqlite\n"
+        )
+
+        result = run_grill(
+            cfg,
+            ScriptedChatLLM([echo, TERMINAL]),
+            "seed",
+            mode="goal",
+            ask_user=lambda: "sqlite is fine",
+            out=lambda _: None,
+            explorer=lambda q: "",
+        )
+
+        assert result.rounds == 1
+        assert "goal: build a todo CLI" in result.brief_md
+
     def test_default_explorer_toolset_registers_and_runs(self, tmp_path):
         # The real explorer requests READ_ONLY_TOOLS; a missing registration
         # only surfaces at Conversation start (KeyError: not registered).

@@ -69,7 +69,11 @@ _PROTECT_PATTERNS: tuple[re.Pattern[str], ...] = (
     re.compile(r"'[^'\s]+'"),
     re.compile(r"https?://[^\s⟦⟧]+"),
     re.compile(r"(\.{0,2}/)?[\w.\-]+(/[\w.\-]+)+"),
-    re.compile(r"\b[A-Z][A-Z0-9_]{2,}\b"),
+    # Guarded against the placeholder syntax: "V10" and up would otherwise
+    # match this pattern, so protecting a message with ten or more spans
+    # re-stashed its own placeholders and restore() emitted the literal
+    # placeholder body ("V10") in place of the protected text.
+    re.compile(r"(?<!⟦)\b[A-Z][A-Z0-9_]{2,}\b(?!⟧)"),
 )
 
 

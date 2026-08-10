@@ -280,7 +280,16 @@ class TestSetup:
         assert session.state["assumed"] == ["epsilon: keep 0.0"]
 
 
-class TestDispatch:
+class TestDispatchErrors:
+    def test_unknown_flag_returns_usage_instead_of_exiting(self, tmp_path):
+        # argparse's "unrecognized arguments" path raises SystemExit, which is
+        # a BaseException — it would tear down the whole REPL session.
+        from vyvcode.research import dispatch
+
+        message = dispatch(load_config(tmp_path, env={}), "start --bogus")
+
+        assert "autoresearch" in message
+
     def test_non_checkout_gets_setup_hint(self, tmp_path):
         cfg = load_config(tmp_path, env={})
 

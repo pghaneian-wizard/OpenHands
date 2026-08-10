@@ -166,6 +166,39 @@ class ConfigError(Exception):
     pass
 
 
+# Knobs whose value must be at least 1 to be usable at all: each one sizes a
+# loop or a thread pool, and 0 or a negative number fails deep inside a run
+# (ThreadPoolExecutor rejects max_workers < 1) rather than here.
+_MIN_ONE_KNOBS = frozenset(
+    {
+        "MAX_PARALLEL_CODERS",
+        "MAX_REVIEW_CYCLES",
+        "GRILL_ROUNDS_PLAN",
+        "GRILL_ROUNDS_GOAL",
+        "CODER_MAX_ITER",
+    }
+)
+
+
+def _parse_number(var: str, raw: str, kind: str) -> object:
+    try:
+        if kind == "int":
+            value = int(raw)
+        elif kind == "float":
+            value = float(raw)
+        else:  # float_opt
+            return float(raw) if raw.strip() else None
+    except ValueError:
+        expected = "an integer" if kind == "int" else "a number"
+        raise ConfigError(f"{var}={raw!r} is not {expected}") from None
+    suffix = var[len("VYVCODE_") :]
+    if suffix in _MIN_ONE_KNOBS and value < 1:
+        raise ConfigError(f"{var}={raw!r} must be 1 or greater")
+    if value < 0:
+        raise ConfigError(f"{var}={raw!r} must not be negative")
+    return value
+
+
 def load_config(
     project_root: Path | str | None = None,
     env: Mapping[str, str] | None = None,
@@ -242,12 +275,10 @@ def load_config(
         raw = get(f"VYVCODE_{suffix}")
         if raw is None:
             knobs[suffix] = default
-        elif kind == "int":
-            knobs[suffix] = int(raw)
         elif kind == "bool":
             knobs[suffix] = _parse_bool(raw)
-        elif kind == "float_opt":
-            knobs[suffix] = float(raw) if raw.strip() else None
+        elif kind in ("int", "float", "float_opt"):
+            knobs[suffix] = _parse_number(f"VYVCODE_{suffix}", raw, kind)
         else:
             knobs[suffix] = raw
 
@@ -256,10 +287,8 @@ def load_config(
         raw = get(f"VYVCODE_{suffix}")
         if raw is None:
             ar_knobs[suffix] = default
-        elif kind == "int":
-            ar_knobs[suffix] = int(raw)
-        elif kind == "float":
-            ar_knobs[suffix] = float(raw)
+        elif kind in ("int", "float"):
+            ar_knobs[suffix] = _parse_number(f"VYVCODE_{suffix}", raw, kind)
         else:
             ar_knobs[suffix] = raw
 

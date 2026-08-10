@@ -72,6 +72,36 @@ class TestPipelineGlue:
         assert "plan rejected twice" in closing
         assert latest_run(cfg.runs_dir).state == "ABORTED"
 
+    def test_failure_before_the_first_transition_still_aborts_the_run(
+        self, tmp_path, monkeypatch
+    ):
+        # Building the communicator happens before any state transition; if it
+        # throws, the run must not be left stranded in IDLE, blocking every
+        # later pipeline command for the rest of the session.
+        import pytest
+
+        import vyvcode.pipeline as pipeline_mod
+        from vyvcode.run_state import active_run
+
+        cfg = load_config(tmp_path, env={})
+
+        def exploding_llm_for(role, cfg, **kwargs):
+            raise RuntimeError("bad model config")
+
+        monkeypatch.setattr(pipeline_mod, "llm_for", exploding_llm_for)
+
+        with pytest.raises(RuntimeError, match="bad model config"):
+            run_pipeline(
+                cfg,
+                mode="goal",
+                raw_text="tiny goal",
+                ask_user=lambda: "",
+                out=lambda _: None,
+            )
+
+        assert latest_run(cfg.runs_dir).state == "ABORTED"
+        assert active_run(cfg.runs_dir) is None
+
     def test_eof_at_answers_prompt_aborts_gracefully(self, tmp_path):
         from tests.test_grill import ROUND_1
 

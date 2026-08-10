@@ -19,7 +19,7 @@ from pathlib import Path
 from openhands.sdk import Message, TextContent
 
 from vyvcode.assets import assets_root
-from vyvcode.config import VyvConfig
+from vyvcode.config import VyvConfig, redact
 from vyvcode.models import llm_for
 from vyvcode.optimizer import response_text
 from vyvcode.run_state import slugify
@@ -116,7 +116,9 @@ def gather_context(project_root: Path) -> str:
                 timeout=15, check=False,
             )
             return proc.stdout.strip()
-        except (OSError, subprocess.TimeoutExpired):
+        except (OSError, ValueError, subprocess.TimeoutExpired):
+            # ValueError covers UnicodeDecodeError from text=True: a latin-1
+            # commit message or filename must not break context gathering.
             return ""
 
     parts = []
@@ -155,6 +157,20 @@ def _msg(role: str, text: str) -> Message:
     return Message(role=role, content=[TextContent(text=text)])
 
 
+def _is_terminal(reply: str) -> bool:
+    """Does this reply end the interview?
+
+    The marker alone is not enough: the harness's own nudge and cap directives
+    quote it, so a model that echoes the instruction while still asking
+    questions would otherwise end the interview and then fail the BRIEF check,
+    discarding every answered round.
+    """
+    if FRONTIER_EMPTY not in reply:
+        return False
+    first_line = next((ln for ln in reply.splitlines() if ln.strip()), "")
+    return first_line.strip().startswith(FRONTIER_EMPTY) or "# BRIEF" in reply
+
+
 def run_grill(
     cfg: VyvConfig,
     llm,
@@ -179,7 +195,7 @@ def run_grill(
         history.append(_msg("assistant", reply))
         transcript.append(f"\n## model\n{reply}")
 
-        if FRONTIER_EMPTY in reply:
+        if _is_terminal(reply):
             spec, brief = _extract_terminal(reply, mode)
             return GrillResult(
                 brief_md=brief,
@@ -210,13 +226,16 @@ def run_grill(
 
         out(reply)  # grill rounds render verbatim — they are for the user
 
+        # The explorer is a real agent with terminal access and the answer is
+        # typed by hand, so both can carry a key. Neither may reach the
+        # provider on the next round or the transcript on disk (§16).
         fact_lines = []
         for question in _NEEDS_FACT.findall(reply):
-            finding = explorer(question)
+            finding = redact(explorer(question), cfg.secret_values)
             fact_lines.append(f"FACT ({question}): {finding}")
             transcript.append(f"\n## explorer\nQ: {question}\nA: {finding}")
 
-        answer = ask_user()
+        answer = redact(ask_user(), cfg.secret_values)
         transcript.append(f"\n## user\n{answer}")
         parts = [answer, *fact_lines]
         if rounds_cap is not None and rounds >= rounds_cap:
