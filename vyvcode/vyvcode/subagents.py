@@ -30,6 +30,11 @@ def agent_prompt(name: str) -> str:
 def _ensure_tools_registered() -> None:
     global _tools_registered
     if not _tools_registered:
+        # Importing a tool module registers it; the default preset only covers
+        # terminal/file_editor/task_tracker — glob and grep must be imported
+        # explicitly or Conversation start dies with "'glob' is not registered".
+        from openhands.tools.glob import GlobTool  # noqa: F401
+        from openhands.tools.grep import GrepTool  # noqa: F401
         from openhands.tools.preset.default import register_default_tools
 
         register_default_tools(enable_browser=False)

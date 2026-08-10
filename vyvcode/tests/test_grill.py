@@ -79,6 +79,23 @@ class TestGrillLoop:
         assert "FACT (does the repo already have a database dependency?)" in fact_round
         assert "## explorer" in result.transcript
 
+    def test_default_explorer_toolset_registers_and_runs(self, tmp_path):
+        # The real explorer requests READ_ONLY_TOOLS; a missing registration
+        # only surfaces at Conversation start (KeyError: not registered).
+        from tests.fakes import ScriptedLLM, text_message
+
+        from vyvcode.subagents import READ_ONLY_TOOLS, run_agent_task
+
+        answer = run_agent_task(
+            ScriptedLLM.make([text_message("nothing relevant found")]),
+            "you are an explorer",
+            "look around",
+            tmp_path,
+            tools=READ_ONLY_TOOLS,
+        )
+
+        assert answer == "nothing relevant found"
+
     def test_cap_forces_assumed_section(self, cfg):
         llm = ScriptedChatLLM([ROUND_1, TERMINAL_ASSUMED])
 
