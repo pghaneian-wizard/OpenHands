@@ -140,7 +140,10 @@ def run_pipeline(
         memory.write_digest(cfg, run.run_id, digest, goal=optimized)
         return f"run {run.run_id}: {run.state}"
 
-    except PipelineAborted:
+    except (PipelineAborted, EOFError):
+        # EOFError: stdin closed at the answers> prompt (Ctrl-D) — same as abort.
+        if run.state not in TERMINAL_STATES:
+            run.to("ABORTED")
         return f"run {run.run_id} aborted; artifacts in {run.dir}"
     except BaseException:
         # Crash (or Ctrl-C): don't strand the run mid-flight — it would block

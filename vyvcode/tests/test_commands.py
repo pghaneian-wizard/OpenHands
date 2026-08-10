@@ -78,6 +78,19 @@ class TestDispatchTable:
         ]
         assert "unknown:/nope" in out_lines
 
+    def test_command_exception_does_not_kill_loop(self):
+        class ExplodingHandlers(RecordingHandlers):
+            def pipeline(self, mode, arg):
+                raise RuntimeError("boom")
+
+        handlers = ExplodingHandlers()
+        out_lines = []
+
+        repl_loop(["/goal explode", "/vyvcode:status"], handlers, out=out_lines.append)
+
+        assert any("boom" in line for line in out_lines)
+        assert ("status",) in handlers.calls
+
     @pytest.mark.parametrize("word", ["exit", "quit", "q", "Exit"])
     def test_exit_words_leave_loop_before_any_model_call(self, word):
         handlers = RecordingHandlers()

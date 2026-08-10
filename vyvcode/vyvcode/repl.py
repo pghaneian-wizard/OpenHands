@@ -31,6 +31,11 @@ def repl_loop(lines: Iterable[str], handlers, out=print) -> None:
         except NotImplementedError as exc:
             out(str(exc))
             continue
+        except Exception as exc:
+            # A broken command must not kill the REPL; the run is already
+            # marked ABORTED by the pipeline's own crash handling.
+            out(f"error: {type(exc).__name__}: {exc}")
+            continue
         if message:
             out(message)
 

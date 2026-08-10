@@ -72,6 +72,27 @@ class TestPipelineGlue:
         assert "plan rejected twice" in closing
         assert latest_run(cfg.runs_dir).state == "ABORTED"
 
+    def test_eof_at_answers_prompt_aborts_gracefully(self, tmp_path):
+        from tests.test_grill import ROUND_1
+
+        cfg = load_config(tmp_path, env={})
+
+        def eof_ask_user():
+            raise EOFError
+
+        closing = run_pipeline(
+            cfg,
+            mode="goal",
+            raw_text="tiny goal",
+            ask_user=eof_ask_user,
+            out=lambda _: None,
+            communicator=ScriptedChatLLM([ROUND_1, TERMINAL]),
+            explorer=lambda q: "n/a",
+        )
+
+        assert "aborted" in closing
+        assert latest_run(cfg.runs_dir).state == "ABORTED"
+
     def test_unexpected_crash_marks_run_aborted_not_stranded(self, tmp_path):
         import pytest
 
