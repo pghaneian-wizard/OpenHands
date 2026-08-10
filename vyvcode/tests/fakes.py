@@ -33,6 +33,20 @@ def tool_call_message(
     )
 
 
+class ScriptedChatLLM:
+    """Chat-only fake: completion() pops scripted reply strings, records history."""
+
+    def __init__(self, replies: list[str]):
+        self.replies = list(replies)
+        self.histories: list[list[Message]] = []
+
+    def completion(self, messages, **kwargs):
+        self.histories.append(list(messages))
+        if not self.replies:
+            raise AssertionError("ScriptedChatLLM: script exhausted")
+        return type("R", (), {"message": text_message(self.replies.pop(0))})()
+
+
 class ScriptedLLM(LLM):
     """An LLM whose completion() pops pre-scripted assistant Messages."""
 
