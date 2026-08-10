@@ -1,0 +1,30 @@
+[project]
+name = "vyvcode"
+version = "0.1.0"
+description = "VyvCode — multi-model CLI coding agent: token-optimizing front agent, grill-driven planning, parallel coder swarm, review-until-clean loop, persistent memory."
+requires-python = ">=3.12"
+dependencies = [
+    "openhands-sdk==1.41.0",
+    "openhands-tools==1.41.0",
+    "python-dotenv>=1.0.1",
+    "prompt-toolkit>=3.0.47",
+    "tiktoken>=0.8.0",
+    "pyyaml>=6.0.1",
+]
+
+[project.scripts]
+vyvcode = "vyvcode.cli:main"
+
+[dependency-groups]
+dev = ["pytest>=8.3.0"]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["vyvcode"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"

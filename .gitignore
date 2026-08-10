@@ -43,3 +43,11 @@ build-fresh/
 /resources/bin/
 # Downloaded Node.js distribution (populated by `npm run download-node` before packaging)
 /resources/node/
+
+# VyvCode (Python overlay)
+vyvcode/.venv/
+.vyvcode/
+.memsearch/
+.pytest_cache/
+*.egg-info/
+vyvcode/**/__pycache__/
