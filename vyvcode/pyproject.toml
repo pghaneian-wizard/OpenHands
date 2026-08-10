@@ -17,7 +17,9 @@ dependencies = [
 vyvcode = "vyvcode.cli:main"
 
 [dependency-groups]
-dev = ["pytest>=8.3.0"]
+# matplotlib is dev-only: at runtime progress.png renders inside the AR
+# checkout's own env (upstream already depends on matplotlib).
+dev = ["pytest>=8.3.0", "matplotlib>=3.9"]
 
 [tool.uv]
 # PYSEC-2026-3447: transitive setuptools < 83 flagged by pip-audit. memsearch

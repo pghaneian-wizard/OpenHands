@@ -1092,16 +1092,257 @@ def _maybe_strategist(cfg: VyvConfig, session: ResearchSession, strategist_fn,
         session.journal(f"strategist pass failed ({trigger}): {redact_exc(cfg, exc)}")
 
 
-def default_strategist_pass(cfg, session, trigger, out) -> None:
-    raise ResearchError("strategist lands in B15")
+# ── strategist (§6) ──────────────────────────────────────────────────────────
+
+STRATEGIST_TASK = """\
+Strategist pass (trigger: {trigger}) for autoresearch session {session_id}.
+Baseline noise spread: {spread:.6f} — do not chase deltas inside it.
+
+<results_tsv>
+{tsv}
+</results_tsv>
+
+<journal_recent>
+{journal}
+</journal_recent>
+
+<diff_baseline_to_best>
+{diff}
+</diff_baseline_to_best>
+
+<current_strategy_block>
+{block}
+</current_strategy_block>
+
+Write the replacement strategy block now.
+"""
+
+STRATEGIST_RETRY = (
+    "Your output tampered with the strategy markers or was empty. Output ONLY "
+    "the block contents: plain markdown, no <!-- vyvcode:strategy --> markers, "
+    "no preamble."
+)
+
+
+def default_strategist_pass(cfg: VyvConfig, session: ResearchSession,
+                            trigger: str, out=print, runner=None) -> None:
+    ar_dir = session.ar_dir
+    if runner is None:
+        from vyvcode.models import llm_for
+        from vyvcode.subagents import READ_ONLY_TOOLS, agent_prompt, run_agent_task
+
+        def runner(task: str) -> str:
+            return run_agent_task(
+                llm_for("strategist", cfg),
+                system_prompt=agent_prompt("vyvcode-strategist"),
+                task=task,
+                workspace=ar_dir,
+                tools=READ_ONLY_TOOLS,
+            )
+
+    baseline = session.state["baseline"]
+    best = session.state["best"]
+    diff = _git(ar_dir, "diff", f"{baseline['sha']}..{best['sha']}", "--",
+                "train.py", check=False).stdout
+    task = STRATEGIST_TASK.format(
+        trigger=trigger,
+        session_id=session.session_id,
+        spread=baseline.get("spread", 0.0),
+        tsv=session.tsv_path.read_text() if session.tsv_path.is_file() else "(none)",
+        journal=session.journal_tail(15),
+        diff=diff or "(best == baseline, no accumulated diff)",
+        block=read_strategy_block(ar_dir / "program.md"),
+    )
+
+    def valid(text: str) -> bool:
+        return bool(text.strip()) and "vyvcode:strategy" not in text
+
+    reply = runner(task)
+    if not valid(reply):
+        reply = runner(STRATEGIST_RETRY)
+    if not valid(reply):
+        session.journal(
+            f"strategist pass ({trigger}) skipped: output tampered with the "
+            "markers twice"
+        )
+        return
+
+    replace_strategy_block(ar_dir / "program.md", reply)
+    session.state["strategist_passes"] += 1
+    _git(ar_dir, "add", "program.md")
+    _git(ar_dir, "commit", "-m",
+         f"strategy: pass {session.state['strategist_passes']}")
+    # The strategy commit is now HEAD; best must follow it or the next
+    # discard's reset --hard would rewind the strategy away.
+    session.state["best"]["sha"] = _head_sha(ar_dir)
+    session.save()
+    session.journal(f"strategist pass {session.state['strategist_passes']} "
+                    f"({trigger}) rewrote the strategy block")
+    out(f"strategist pass {session.state['strategist_passes']} ({trigger})")
+
+
+# ── report + progress plot (§6.4) ────────────────────────────────────────────
+
+_PLOT_SCRIPT = """\
+import sys
+import matplotlib
+matplotlib.use("Agg")
+import matplotlib.pyplot as plt
+
+tsv_path, out_path = sys.argv[1], sys.argv[2]
+rows = [l.split("\\t") for l in open(tsv_path).read().splitlines()[1:]]
+xs, ys, keeps, best_line = [], [], [], []
+best = None
+for i, row in enumerate(rows):
+    val, status = float(row[1]), row[3]
+    if val > 0:
+        xs.append(i)
+        ys.append(val)
+        if status == "keep":
+            keeps.append((i, val))
+        best = val if best is None or (status == "keep" and val < best) else best
+    best_line.append(best)
+fig, ax = plt.subplots(figsize=(10, 5), dpi=120)
+ax.plot(xs, ys, "o-", color="#888", alpha=0.6, label="experiments")
+if keeps:
+    ax.plot(*zip(*keeps), "o", color="#2a7", markersize=10, label="keeps")
+ax.step(range(len(best_line)), best_line, where="post", color="#27c",
+        label="best so far")
+ax.set_xlabel("experiment index")
+ax.set_ylabel("val_bpb (lower is better)")
+ax.legend()
+fig.tight_layout()
+fig.savefig(out_path)
+"""
+
+
+def progress_png(session: ResearchSession, python_argv: list[str] | None = None,
+                 runner=subprocess.run) -> Path | None:
+    """Render progress.png from results.tsv using the AR checkout's own env
+    (matplotlib is already in upstream's dependency set — no new packages)."""
+    if not session.tsv_path.is_file():
+        return None
+    script = session.dir / "_plot.py"
+    script.write_text(_PLOT_SCRIPT)
+    out_path = session.dir / "progress.png"
+    argv = (python_argv or ["uv", "run", "python"]) + [
+        str(script), str(session.tsv_path), str(out_path)
+    ]
+    proc = runner(argv, cwd=session.ar_dir, capture_output=True, text=True,
+                  timeout=120, check=False)
+    if proc.returncode != 0 or not out_path.is_file():
+        session.journal(f"progress.png skipped: {proc.stderr.strip()[-300:]}")
+        return None
+    return out_path
+
+
+def render_research_report(cfg: VyvConfig, session: ResearchSession) -> str:
+    state = session.reload().state
+    baseline, best = state["baseline"], state["best"]
+    counts = state["counts"]
+    experiments = session.experiments()
+    keeps = [e for e in experiments if e.get("decision") == "keep"]
+    crashes = [e for e in experiments if e.get("decision") == "crash"]
+
+    delta = best["val_bpb"] - baseline["val_bpb"]
+    pct = 100 * delta / baseline["val_bpb"] if baseline["val_bpb"] else 0.0
+    lines = [f"# Autoresearch report — {state['session_id']}", ""]
+    lines += [
+        f"- branch: {state['branch']} (best sha {best['sha']}, exp {best['exp_id']})",
+        f"- val_bpb: baseline {baseline['val_bpb']:.6f} → best "
+        f"{best['val_bpb']:.6f} (Δ{delta:+.6f}, {pct:+.2f}%); "
+        f"noise spread {baseline.get('spread', 0.0):.6f}",
+        f"- experiments: {counts['run']} run / {counts['kept']} kept / "
+        f"{counts['discarded']} discarded / {counts['crashed']} crashed",
+        f"- strategist passes: {state['strategist_passes']}",
+        "",
+    ]
+
+    lines += ["## Keeps", ""]
+    if keeps:
+        lines += ["| exp | hypothesis | val_bpb | Δ |", "|---|---|---|---|"]
+        previous = baseline["val_bpb"]
+        for e in keeps:
+            delta_k = e["val_bpb"] - previous
+            lines += [f"| {e['exp_id']:03d} | {e['hypothesis']} | "
+                      f"{e['val_bpb']:.6f} | {delta_k:+.6f} |"]
+            previous = e["val_bpb"]
+    else:
+        lines += ["- none (baseline stands)"]
+    lines += [""]
+
+    first_ok = next((e for e in experiments if e.get("val_bpb")), None)
+    last_keep = keeps[-1] if keeps else None
+    if first_ok and last_keep:
+        lines += ["## Drift (first → best)", ""]
+        for label, key in (("params_M", "num_params_M"),
+                           ("peak_vram_mb", "peak_vram_mb"), ("mfu_%", "mfu")):
+            a, b = first_ok.get(key), last_keep.get(key)
+            if a is not None and b is not None:
+                lines += [f"- {label}: {a} → {b}"]
+        lines += [""]
+
+    if crashes:
+        lines += ["## Crashes", ""]
+        for e in crashes[:10]:
+            lines += [f"- exp {e['exp_id']:03d}: {e['hypothesis']} — {e['reason']}"]
+        lines += [""]
+
+    tokens = sum(e.get("tokens_spent") or 0 for e in experiments)
+    lines += ["## Spend", "", f"- researcher tokens (SDK metrics): {tokens}", ""]
+
+    lines += [
+        "## Resume", "",
+        f"- /vyvcode:autoresearch start in this checkout continues the session "
+        f"on {state['branch']} from exp {counts['run'] + 1}",
+        f"- artifacts: {session.dir.name}/ (state.json, journal.md, "
+        "experiments.jsonl, logs/, progress.png)",
+        "",
+    ]
+    return "\n".join(lines)
+
+
+def _memory_digest(session: ResearchSession) -> str:
+    state = session.state
+    baseline, best = state["baseline"], state["best"]
+    keeps = [e for e in session.experiments() if e.get("decision") == "keep"]
+    dead = [e for e in session.experiments()
+            if e.get("decision") in ("discard", "crash")]
+    bullets = [
+        f"- autoresearch session {state['session_id']} on {state['branch']}",
+        f"- val_bpb baseline {baseline['val_bpb']:.6f} → best "
+        f"{best['val_bpb']:.6f} over {state['counts']['run']} experiments",
+    ]
+    for e in keeps[:4]:
+        bullets.append(f"- win: {e['hypothesis']}")
+    for e in dead[:2]:
+        bullets.append(f"- dead end: {e['hypothesis']} ({e['decision']})")
+    return "\n".join(bullets[:8])
 
 
 def finish_session(cfg: VyvConfig, ar_dir: Path, session: ResearchSession,
-                   out=print, report_fn=None) -> str:
-    counts = session.reload().state["counts"]
+                   out=print, report_fn=None, plot_fn=None) -> str:
+    from dataclasses import replace as _replace
+
+    from vyvcode import memory
+
+    session.reload()
+    report_fn = report_fn or render_research_report
+    report = report_fn(cfg, session)
+    (session.dir / "report.md").write_text(report)
+    (plot_fn or progress_png)(session)
+    out(report)
+
+    ar_cfg = _replace(cfg, project_root=Path(ar_dir))
+    memory.write_digest(
+        ar_cfg, session.session_id, _memory_digest(session),
+        goal=f"autoresearch {session.state['tag']}",
+    )
+    counts = session.state["counts"]
     return (
         f"session {session.session_id}: {counts['run']} run / "
-        f"{counts['kept']} kept / {counts['crashed']} crashed"
+        f"{counts['kept']} kept / {counts['crashed']} crashed — report: "
+        f"{session.dir / 'report.md'}"
     )
 
 
@@ -1124,4 +1365,14 @@ def run_freeform(cfg: VyvConfig, ar_dir: Path, out=print) -> str:
 
 
 def regenerate_report(cfg: VyvConfig, ar_dir: Path, out=print) -> str:
-    raise ResearchError("report lands in B15")
+    session = ResearchSession.latest(ar_dir)
+    if session is None or not session.state.get("baseline"):
+        return "no autoresearch session in this checkout (run setup)"
+    report = render_research_report(cfg, session)
+    (session.dir / "report.md").write_text(report)
+    png = progress_png(session)
+    out(report)
+    return (
+        f"report regenerated: {session.dir / 'report.md'}"
+        + (f", {png}" if png else " (progress.png skipped, see journal)")
+    )
