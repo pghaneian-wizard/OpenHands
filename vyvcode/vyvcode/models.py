@@ -18,6 +18,7 @@ from openhands.sdk.llm.fallback_strategy import FallbackStrategy
 from openhands.sdk.llm.llm_profile_store import LLMProfileStore
 
 from vyvcode.config import ROLES, VyvConfig, redact
+from vyvcode.usage import ledger as usage_ledger
 
 PROBE_PROMPT = "Reply with the single word: ok"
 # Extended-thinking models derive their thinking budget from this value and
@@ -43,7 +44,11 @@ def llm_for(
         kwargs["max_output_tokens"] = max_output_tokens
     if r.fallbacks:
         kwargs["fallback_strategy"] = _fallback_strategy(role, cfg)
-    return LLM(**kwargs)
+    llm = LLM(**kwargs)
+    # Every model call in the app is built here, so this one line is enough to
+    # account for the whole session's spend, per role.
+    usage_ledger.register(role, llm)
+    return llm
 
 
 def coder_llm(cfg: VyvConfig, phase_id: str) -> LLM:

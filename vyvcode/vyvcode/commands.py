@@ -186,6 +186,8 @@ def execute(parsed: Parsed, handlers) -> str | None:
 
 # ── Fast path (D1): one coder, no pipeline ──────────────────────────────────
 
+_FAST_PATH_ID = "task"
+
 
 def run_fast_path(
     cfg: VyvConfig,
@@ -198,17 +200,27 @@ def run_fast_path(
     from openhands.sdk.security.confirmation_policy import NeverConfirm
     from openhands.tools.preset.default import get_default_agent
 
+    from vyvcode.live import RunMonitor, token_reporter
     from vyvcode.quiet import quiet_visualizer
 
-    agent = get_default_agent(llm=llm or llm_for("coder", cfg), cli_mode=True)
+    coder = llm or llm_for("coder", cfg)
+    agent = get_default_agent(llm=coder, cli_mode=True)
+    monitor = RunMonitor(cfg=cfg)
     conversation = Conversation(
         agent=agent,
         workspace=str(workspace or cfg.project_root),
         visualizer=quiet_visualizer(),
+        callbacks=[token_reporter(coder, monitor, _FAST_PATH_ID)],
     )
+    monitor.register(_FAST_PATH_ID, "task")
+    monitor.__enter__()
+    monitor.stage("EXECUTING")
+    monitor.start(_FAST_PATH_ID, "task")
     try:
         conversation.set_confirmation_policy(NeverConfirm())
         conversation.send_message(text)
         conversation.run()
+        monitor.finish(_FAST_PATH_ID, "done")
     finally:
+        monitor.__exit__(None, None, None)
         conversation.close()

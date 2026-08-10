@@ -13,6 +13,7 @@ import datetime as _dt
 from vyvcode import memory
 from vyvcode.config import VyvConfig, redact
 from vyvcode.grill import gather_context, run_grill
+from vyvcode.live import RunMonitor
 from vyvcode.models import llm_for
 from vyvcode.optimizer import optimize
 from vyvcode.planner import PlanValidationError, generate_plan
@@ -44,11 +45,13 @@ def run_pipeline(
     swarm_fn=None,
     review_fn=None,
     report_fn=None,
+    monitor=None,
 ) -> str:
     """Run the full pipeline; returns the closing line for the REPL."""
     ask_user = ask_user or (lambda: input("answers> "))
     raw_text = redact(raw_text, cfg.secret_values)  # never toward a model or disk
     run = Run(cfg.runs_dir, raw_text or mode)
+    monitor = monitor or RunMonitor(out=out, cfg=cfg)
 
     def check_abort() -> None:
         if run.is_aborted:
@@ -57,6 +60,7 @@ def run_pipeline(
     # Everything past the run's creation lives in the try: a failure before the
     # first transition would otherwise strand the run in IDLE, where it blocks
     # every later pipeline command until the process exits.
+    monitor.__enter__()
     try:
         (run.dir / "input.raw.md").write_text(raw_text + "\n", encoding="utf-8")
         communicator = communicator or llm_for("communicator", cfg)
@@ -65,6 +69,7 @@ def run_pipeline(
 
         # ── grill ────────────────────────────────────────────────────────
         run.to("GRILL")
+        monitor.stage("GRILL")
         seed = "\n\n".join(
             part
             for part in (
@@ -90,10 +95,12 @@ def run_pipeline(
                 grill_result.spec_md, encoding="utf-8"
             )
         run.to("BRIEF")
+        monitor.stage("BRIEF")
         check_abort()
 
         # ── plan ─────────────────────────────────────────────────────────
         run.to("PLANNING")
+        monitor.stage("PLANNING")
         try:
             plan = generate_plan(
                 cfg, run, grill_result.brief_md,
@@ -120,13 +127,15 @@ def run_pipeline(
 
         # ── build ────────────────────────────────────────────────────────
         run.to("EXECUTING")
+        monitor.stage("EXECUTING")
         if swarm_fn is None:
             from vyvcode.swarm import execute_swarm as swarm_fn  # noqa: PLW0127
-        swarm_outcome = swarm_fn(cfg, run, plan, out=out)
+        swarm_outcome = _call_stage(swarm_fn, cfg, run, plan, out=out, monitor=monitor)
         check_abort()
 
         # ── review ───────────────────────────────────────────────────────
         run.to("REVIEWING")
+        monitor.stage("REVIEWING")
         if review_fn is None:
             from vyvcode.reviewer import review_loop as review_fn  # noqa: PLW0127
         review_outcome = review_fn(cfg, run, plan, swarm_outcome, out=out)
@@ -134,6 +143,7 @@ def run_pipeline(
         # ── report ───────────────────────────────────────────────────────
         if run.state != "ESCALATED":
             run.to("REPORTING")
+        monitor.stage("REPORTING")
         if report_fn is None:
             from vyvcode.report import render_report as report_fn  # noqa: PLW0127
         report_md = report_fn(cfg, run, plan, swarm_outcome, review_outcome)
@@ -141,6 +151,7 @@ def run_pipeline(
         out(report_md)
         if run.state == "REPORTING":
             run.to("DONE")
+            monitor.stage("DONE")
         digest = memory.make_digest(cfg, communicator, report_md, goal=optimized)
         memory.write_digest(cfg, run.run_id, digest, goal=optimized)
         return f"run {run.run_id}: {run.state}"
@@ -156,6 +167,16 @@ def run_pipeline(
         if run.state not in TERMINAL_STATES:
             run.to("ABORTED")
         raise
+    finally:
+        monitor.__exit__(None, None, None)
+
+
+def _call_stage(fn, cfg, run, plan, out, monitor):
+    """Pass the monitor only to stages that accept one (tests inject fakes)."""
+    try:
+        return fn(cfg, run, plan, out=out, monitor=monitor)
+    except TypeError:
+        return fn(cfg, run, plan, out=out)
 
 
 def _memory_block(cfg: VyvConfig, query: str) -> str:

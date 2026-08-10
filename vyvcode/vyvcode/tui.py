@@ -10,6 +10,9 @@ from prompt_toolkit.styles import Style
 
 from vyvcode.commands import RAW_PREFIX
 from vyvcode.config import VyvConfig
+from vyvcode.usage import fmt_tokens
+from vyvcode.usage import ledger as usage_ledger
+from vyvcode.usage import short_model
 
 # Command -> one-line help, shown in the completion menu (README table).
 COMMAND_HELP: dict[str, str] = {
@@ -56,10 +59,27 @@ class SlashCompleter(Completer):
                 )
 
 
-def bottom_toolbar(cfg: VyvConfig):
-    """One-line status: project dir and the four probed role models."""
-    roles = " · ".join(
-        f"{name} {cfg.roles[name].model.split('/')[-1]}"
-        for name in ("communicator", "planner", "coder", "reviewer")
-    )
-    return f" {cfg.project_root}  |  {roles} "
+def bottom_toolbar(cfg: VyvConfig, ledger=None):
+    """One-line status: project dir, then this session's spend per model.
+
+    Before anything has been spent there is nothing to total, so the line
+    shows which model each role is configured to use instead.
+    """
+    ledger = ledger if ledger is not None else usage_ledger
+    rows = ledger.snapshot()
+    if rows:
+        models = " · ".join(
+            f"{row.role} {short_model(row.model)} {fmt_tokens(row.tokens)}"
+            for row in rows
+        )
+        cost = ledger.total_cost()
+        total = f"  |  {fmt_tokens(ledger.total_tokens())} tok"
+        if cost:
+            total += f" ${cost:.2f}"
+    else:
+        models = " · ".join(
+            f"{role} {short_model(cfg.roles[role].model)}"
+            for role in ("communicator", "planner", "coder", "reviewer")
+        )
+        total = ""
+    return f" {cfg.project_root}  |  {models}{total} "

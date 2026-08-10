@@ -158,6 +158,7 @@ class TestScheduler:
 
         execute_swarm(cfg, run, plan, out=lambda _: None,
                       coder_runner=runner, monitor=monitor)
+        monitor.__exit__(None, None, None)  # caller-supplied monitor: caller closes
 
         assert {s.state for s in monitor.phases.values()} == {"merged"}
         assert all(s.tokens == 1000 for s in monitor.phases.values())

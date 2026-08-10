@@ -436,6 +436,7 @@ def execute_swarm(
     _git(integration_dir, "add", "docs/vyvcode/plans")
     _git(integration_dir, "commit", "-m", f"vyvcode: MasterPlan for {run.run_id}")
 
+    nested = monitor is not None  # the pipeline already opened the panel
     monitor = monitor or SwarmMonitor(out=out)
     for pid, phase in plan.phases.items():
         monitor.register(pid, phase.name)
@@ -496,7 +497,8 @@ def execute_swarm(
 
     executor = ThreadPoolExecutor(max_workers=cfg.max_parallel_coders)
     in_flight: dict = {}
-    monitor.__enter__()
+    if not nested:
+        monitor.__enter__()
     try:
         while True:
             if run.is_aborted:
@@ -556,7 +558,8 @@ def execute_swarm(
                     _git(root, "branch", "-D", phase.worktree_branch, check=False)
     finally:
         executor.shutdown(wait=True)
-        monitor.__exit__(None, None, None)
+        if not nested:
+            monitor.__exit__(None, None, None)
 
     # Full Phase-F suite on integration after the last merge (§10.5).
     final_ids = [p for p in plan.order if p.upper() in ("F", "PF")]

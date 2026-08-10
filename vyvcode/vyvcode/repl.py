@@ -53,6 +53,7 @@ def _interactive_lines(history_path, cfg: VyvConfig) -> Iterable[str]:
         complete_while_typing=True,
         style=PROMPT_STYLE,
         bottom_toolbar=lambda: bottom_toolbar(cfg),
+        refresh_interval=1.0,  # keeps the spend line current while idle
     )
     while True:
         try:
