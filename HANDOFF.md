@@ -1,12 +1,12 @@
 # HANDOFF
 
-**Date:** 2026-08-10 (end of the hardening session)
+**Date:** 2026-08-10 (end of the hardening + UX session)
 **Repo state:** two independent workstreams live here —
 
 | Workstream | Where | State |
 |---|---|---|
 | 1. OpenHands → Vyvcode rebrand of the TS app | working tree + index on `main` | complete, verified, **still uncommitted** |
-| 2. VyvCode Python CLI agent | branch `vyvcode-build`, dir `vyvcode/` | built, hardened, **pushed to `origin/vyvcode-build`**, deployed, all four roles live |
+| 2. VyvCode Python CLI agent | branch `vyvcode-build`, dir `vyvcode/` | built, hardened, live status UI, **pushed to `origin/vyvcode-build`**, deployed, all four roles live |
 
 The two must not be mixed in a commit. The rebrand sits as ~700 modified files plus 8 staged renames in the index; every VyvCode commit was made with `git commit --only <paths>` to step around it. Keep doing that (details in `CLAUDE.md`).
 
@@ -65,9 +65,11 @@ If you write another bulk rename, cover the escaped variants and re-run the suit
 
 # Part 2 — VyvCode Python CLI agent (`vyvcode-build`, pushed)
 
-25 commits on `main..vyvcode-build`. The build itself was B0–B16 (one commit per runbook phase); the last six commits are this session's hardening pass:
+27 commits on `main..vyvcode-build`. The build itself was B0–B16 (one commit per runbook phase); the rest are this session's hardening and UX work:
 
 ```
+d6c0adfc1 vyvcode: activity words, animated progress, per-model token usage
+df601451e vyvcode: fresh HANDOFF — hardening pass, live keys, live swarm panel, open items
 96268c155 vyvcode: live swarm panel + 14 more audit fixes
 67d3e8ec9 vyvcode: audit pass — 18 bugs fixed across optimizer, run state, planner, reviewer, swarm, grill
 c836e1f25 vyvcode: survive answers> EOF and command exceptions — REPL never dies mid-session
@@ -121,11 +123,28 @@ At the `vyvcode>` prompt, typing `/` opens a completion menu of every command wi
 | `/vyvcode:autoresearch …` | overnight ML-research loop |
 | `!raw <text>` | bypass the optimizer verbatim |
 
-During a swarm a live panel stays pinned below the agent output: one row per phase with spinner, state, attempt, elapsed and tokens, then a per-phase and total spend summary. It degrades to plain lines when stdout is not a terminal.
+### What the screen shows
+
+At the prompt, the bottom toolbar carries the project directory and this session's spend per model (`communicator gpt-5.6-sol 5.2k · coder kimi-k3 31.2k | 36.4k tok $0.36`), refreshed once a second so it ticks while you sit idle. Before anything has been spent it lists the configured model per role instead.
+
+During any run — a pipeline or a plain fast-path message — a panel stays pinned below the scrolling agent output:
+
+```
+✧ Percolating… (2m14s · ↓ 36.4k tokens · coder kimi-k3 at max effort)
+▰▰▰▰▰▰▰▰▰▰▰▰▰▱▱▱▱▱▱▱▱▱▱▱  4/7 EXECUTING
+  ⠹  P1 core   Burnishing…    2m14s   12.3k tok
+  ✔  P2 auth   merged         1m02s    8.1k tok
+  ⠹  P3 api    Levitating…      47s    3.4k tok
+communicator gpt-5.6-sol 5.2k · coder kimi-k3 31.2k  |  36.4k tok $0.36
+```
+
+The activity word rotates every ~6 s out of 64 gerunds, seeded per phase so parallel coders never share one, with a shimmer band sweeping its letters. The bar's leading cell breathes, so a long stage never reads as stalled. Everything degrades to plain lines when stdout is not a terminal, which is what the tests and any piped run see.
+
+Accounting hangs off `models.llm_for` — every model in the app is built there, so the optimizer, grill, planner, all parallel coders and the reviewer are captured without threading a counter through the stages (`vyvcode/usage.py`). Snapshots re-read each instance's live metrics, so totals climb while an agent works.
 
 ## Verification
 
-- `cd vyvcode && uv run pytest tests -q` — **183 passed**, no network, no GPU, ~17 s.
+- `cd vyvcode && uv run pytest tests -q` — **195 passed**, no network, no GPU, ~17 s.
 - `vyvcode --probe` from a project directory: **all four roles OK** (communicator 1.9 s, planner 8.4 s, coder 4.7 s, reviewer 9.8 s).
 - pip-audit on the installed venv: no known vulnerabilities (setuptools forced ≥83 via `[tool.uv] override-dependencies` for PYSEC-2026-3447).
 
@@ -136,9 +155,11 @@ During a swarm a live panel stays pinned below the agent output: one row per pha
 - `uv tool install --force --from vyvcode vyvcode` → `~/.local/bin/vyvcode`, v0.1.0. It does **not** track the checkout — re-run after every change.
 - Autoresearch: real 5-min GPU baselines still not run (a vLLM server holds ~55 GB of the 96 GB VRAM — DEVIATIONS D-005). `~/.cache/autoresearch` is already prepared (963 MB, from the Aug 9 run), so `setup` skips `prepare.py` here.
 
-## Hardening pass (this session)
+## This session's work
 
-Five parallel auditors read all 4.9k lines; ~60 findings came back, each verified against the source before any fix. 32 bugs fixed, 53 tests added (130 → 183). Highlights by class:
+Two threads: fixing what was broken, then making a run legible while it happens.
+
+**Audit.** Five parallel auditors read all 4.9k lines; ~60 findings came back, each verified against the source before any fix. 32 bugs fixed, 65 tests added (130 → 195). Highlights by class:
 
 **Silent corruption.** The optimizer's ALL-CAPS protect pattern matched its own placeholders from the tenth span on, so a message naming ten files reached the grill, planner and coders with the literal text `V10` where the paths should be — with all four guard checks passing.
 
@@ -147,6 +168,27 @@ Five parallel auditors read all 4.9k lines; ~60 findings came back, each verifie
 **Wrong results.** The swarm's completion gate counted untracked files, so a coder that ran its own tests — which its prompt orders it to do — failed every phase on any repo without a `.gitignore` for `__pycache__`. An empty suite counted as green, reporting a run where every phase died as a clean success. Malformed reviewer JSON crashed instead of taking the retry path. A repeated `depends_on` entry was reported as a dependency cycle. Autoresearch's `parse_summary` took the first match anywhere in the log, so researcher-added interim logging silently poisoned keep/discard decisions.
 
 **Safety.** A `- run: \`cmd\`` written inside prose was harvested as an acceptance command and executed under `shell=True`; a plan's phase id could contain `../` and escape the run directory; explorer findings and typed answers reached the provider and disk unredacted (the explorer reads `.env` when asked about configuration); `report.md` was the only artifact written without `redact()`; an acceptance timeout killed only the shell, leaving its children running against the worktree; fix coders ran concurrently in one shared worktree, contending on `.git/index.lock`.
+
+**Status UI.** The REPL was silent between "you pressed enter" and "the agent spoke", which on a multi-minute pipeline is indistinguishable from a hang. Added the session ledger (`usage.py`), the toolbar spend line, and `RunMonitor` (`live.py`) — activity words, progress bar, per-phase table, per-model spend. Rendering is exercised by tests through the plain-text path; the animated path was checked by hand in a pty.
+
+## Where the code lives
+
+| Concern | File |
+|---|---|
+| Config, precedence, redaction | `vyvcode/config.py` |
+| Role LLMs, startup probe | `vyvcode/models.py` |
+| Session token ledger | `vyvcode/usage.py` |
+| Live panel, activity words, animation | `vyvcode/live.py` |
+| REPL loop, prompt, completion | `vyvcode/repl.py`, `vyvcode/tui.py` |
+| Command dispatch, fast path | `vyvcode/commands.py` |
+| Pipeline orchestration | `vyvcode/pipeline.py` |
+| Grill interview | `vyvcode/grill.py` |
+| Plan generation + validation | `vyvcode/planner.py` |
+| Coder swarm, worktrees, merge queue | `vyvcode/swarm.py` |
+| Review-until-clean loop | `vyvcode/reviewer.py` |
+| Run state machine, persistence | `vyvcode/run_state.py` |
+| Autoresearch loop | `vyvcode/research.py` |
+| SDK noise suppression, shared console | `vyvcode/quiet.py` |
 
 ## Open items
 
