@@ -181,7 +181,14 @@ def load_config(
     env_file = root / ".env"
     file_env: dict[str, str] = {}
     if env_file.is_file():
-        file_env = {k: v for k, v in dotenv_values(env_file).items() if v is not None}
+        # python-dotenv quirk: "X=   # note" parses to value "# note" (the
+        # inline comment survives only when the value is empty). Treat those
+        # as unset.
+        file_env = {
+            k: v
+            for k, v in dotenv_values(env_file).items()
+            if v is not None and not v.lstrip().startswith("#")
+        }
 
     toml_path = root / "vyvcode.toml"
     toml_cfg: Mapping = {}

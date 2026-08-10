@@ -35,6 +35,9 @@ SIMPLE_COMMANDS = {
 ALIAS_PREFIX = "/vyvecode:"
 CANONICAL_PREFIX = "/vyvcode:"
 
+# Bare exit words leave the REPL instead of being sent to the coder as a task.
+EXIT_WORDS = frozenset({"exit", "quit", "q"})
+
 
 def known_commands() -> list[str]:
     return sorted([*PIPELINE_COMMANDS, *SIMPLE_COMMANDS, RAW_PREFIX])
@@ -42,7 +45,7 @@ def known_commands() -> list[str]:
 
 @dataclass(frozen=True)
 class Parsed:
-    kind: str  # pipeline | grill | memory | status | stop | raw | chat | unknown | empty
+    kind: str  # pipeline | grill | memory | status | stop | raw | chat | unknown | empty | exit
     arg: str = ""
     mode: str | None = None
 
@@ -51,6 +54,8 @@ def parse_line(line: str) -> Parsed:
     stripped = line.strip()
     if not stripped:
         return Parsed("empty")
+    if stripped.lower() in EXIT_WORDS:
+        return Parsed("exit")
     if stripped == RAW_PREFIX or stripped.startswith(RAW_PREFIX + " "):
         return Parsed("raw", stripped[len(RAW_PREFIX) :].strip())
     if stripped.startswith("/"):
@@ -189,9 +194,13 @@ def run_fast_path(
     from openhands.sdk.security.confirmation_policy import NeverConfirm
     from openhands.tools.preset.default import get_default_agent
 
+    from vyvcode.quiet import quiet_visualizer
+
     agent = get_default_agent(llm=llm or llm_for("coder", cfg), cli_mode=True)
     conversation = Conversation(
-        agent=agent, workspace=str(workspace or cfg.project_root)
+        agent=agent,
+        workspace=str(workspace or cfg.project_root),
+        visualizer=quiet_visualizer(),
     )
     try:
         conversation.set_confirmation_policy(NeverConfirm())

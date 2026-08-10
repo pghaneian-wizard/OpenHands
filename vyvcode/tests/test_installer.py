@@ -1,7 +1,30 @@
 """Asset installer + SDK discovery of installed agents and skills (§7/B5)."""
 
+from vyvcode.assets import assets_root
 from vyvcode.config import load_config
 from vyvcode.installer import install_assets
+
+
+class TestAssetsRoot:
+    def test_wheel_layout_assets_inside_package(self, tmp_path):
+        pkg = tmp_path / "site-packages" / "vyvcode"
+        (pkg / "skills").mkdir(parents=True)
+        (pkg / "agents").mkdir()
+
+        assert assets_root(pkg) == pkg
+
+    def test_checkout_layout_assets_beside_package(self, tmp_path):
+        pkg = tmp_path / "repo" / "vyvcode"
+        pkg.mkdir(parents=True)
+        (tmp_path / "repo" / "skills").mkdir()
+
+        assert assets_root(pkg) == pkg.parent
+
+    def test_default_resolves_to_real_skills_and_agents(self):
+        root = assets_root()
+
+        assert (root / "skills" / "vyvcode-grill" / "SKILL.md").is_file()
+        assert (root / "agents" / "vyvcode-coder.md").is_file()
 
 AGENT_NAMES = (
     "vyvcode-communicator",

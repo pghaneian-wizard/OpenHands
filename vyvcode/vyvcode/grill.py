@@ -18,6 +18,7 @@ from pathlib import Path
 
 from openhands.sdk import Message, TextContent
 
+from vyvcode.assets import assets_root
 from vyvcode.config import VyvConfig
 from vyvcode.models import llm_for
 from vyvcode.optimizer import response_text
@@ -28,7 +29,7 @@ FRONTIER_EMPTY = "FRONTIER-EMPTY"
 _NEEDS_FACT = re.compile(r"(?m)^\s*NEEDS-FACT:\s*(.+)$")
 _QUESTION_MARK = "❓"
 
-SKILLS_DIR = Path(__file__).resolve().parent.parent / "skills"
+SKILLS_DIR = assets_root() / "skills"
 
 BRIEF_SCHEMA = """\
 # BRIEF

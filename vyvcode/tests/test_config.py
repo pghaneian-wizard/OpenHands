@@ -38,6 +38,19 @@ class TestPrecedence:
         assert cfg.roles["reviewer"].model == "toml-reviewer"
         assert cfg.max_review_cycles == 9
 
+    def test_dotenv_empty_value_with_inline_comment_is_unset(self, tmp_path):
+        # python-dotenv keeps the comment as the value when the value is empty:
+        # "X=   # note" parses to "# note". Must read as unset, not crash float().
+        _write(
+            tmp_path / ".env",
+            "VYVCODE_CODER_MAX_BUDGET=   # optional $ cap per phase\n"
+            "OPENROUTER_API_KEY=   # optional fallback routing\n",
+        )
+
+        cfg = load_config(tmp_path, env={})
+
+        assert cfg.coder_max_budget is None
+
     def test_dotenv_beats_toml(self, tmp_path):
         _write(tmp_path / ".env", "VYVCODE_REVIEWER_MODEL=dotenv-reviewer\n")
         _write(tmp_path / "vyvcode.toml", '[models]\nreviewer_model = "toml-reviewer"\n')

@@ -10,7 +10,9 @@ from __future__ import annotations
 import re
 from pathlib import Path
 
-AGENTS_DIR = Path(__file__).resolve().parent.parent / "agents"
+from vyvcode.assets import assets_root
+
+AGENTS_DIR = assets_root() / "agents"
 
 READ_ONLY_TOOLS = ("terminal", "glob", "grep")
 
@@ -57,6 +59,8 @@ def run_agent_task(
     from openhands.sdk import Agent, Conversation, Tool
     from openhands.sdk.security.confirmation_policy import NeverConfirm
 
+    from vyvcode.quiet import quiet_visualizer
+
     _ensure_tools_registered()
     agent = Agent(
         llm=llm,
@@ -66,7 +70,12 @@ def run_agent_task(
     kwargs: dict = {}
     if max_iterations is not None:
         kwargs["max_iteration_per_run"] = max_iterations
-    conversation = Conversation(agent=agent, workspace=str(workspace), **kwargs)
+    conversation = Conversation(
+        agent=agent,
+        workspace=str(workspace),
+        visualizer=quiet_visualizer(),
+        **kwargs,
+    )
     try:
         conversation.set_confirmation_policy(NeverConfirm())
         conversation.send_message(task)

@@ -14,9 +14,10 @@ from __future__ import annotations
 import hashlib
 from pathlib import Path
 
+from vyvcode.assets import assets_root
 from vyvcode.config import VyvConfig
 
-ASSETS_ROOT = Path(__file__).resolve().parent.parent
+ASSETS_ROOT = assets_root()
 
 
 def _stamps(cfg: VyvConfig) -> dict[str, str]:

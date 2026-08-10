@@ -78,6 +78,15 @@ class TestDispatchTable:
         ]
         assert "unknown:/nope" in out_lines
 
+    @pytest.mark.parametrize("word", ["exit", "quit", "q", "Exit"])
+    def test_exit_words_leave_loop_before_any_model_call(self, word):
+        handlers = RecordingHandlers()
+        out_lines = []
+
+        repl_loop([word, "this line must never run"], handlers, out=out_lines.append)
+
+        assert handlers.calls == []
+
     def test_raw_prefix_stripped_and_marked(self):
         parsed = parse_line("!raw don't touch teh spelling")
 
@@ -169,3 +178,86 @@ class TestFastPath:
         run_fast_path(cfg, "create hello.txt containing hi", llm=llm, workspace=tmp_path)
 
         assert target.read_text() == "hi"
+
+
+class TestSlashCompleter:
+    def _completions(self, text):
+        from prompt_toolkit.completion import CompleteEvent
+        from prompt_toolkit.document import Document
+
+        from vyvcode.tui import SlashCompleter
+
+        return [
+            c.text
+            for c in SlashCompleter().get_completions(
+                Document(text, len(text)), CompleteEvent()
+            )
+        ]
+
+    def test_bare_slash_lists_every_command(self):
+        shown = self._completions("/")
+
+        for command in ["/vyvcode:brainstorm", "/plan", "/goal", "/memory-recall"]:
+            assert command in shown
+
+    def test_prefix_filters(self):
+        shown = self._completions("/vyvcode:s")
+
+        assert shown == ["/vyvcode:status", "/vyvcode:stop"]
+
+    def test_bang_completes_raw(self):
+        assert self._completions("!") == ["!raw"]
+
+    def test_no_completion_after_command_token(self):
+        assert self._completions("/plan add tests ") == []
+
+    def test_plain_text_not_completed(self):
+        assert self._completions("fix the login bug") == []
+
+    def test_help_covers_every_dispatchable_command(self):
+        from vyvcode.commands import PIPELINE_COMMANDS, RAW_PREFIX, SIMPLE_COMMANDS
+        from vyvcode.tui import COMMAND_HELP
+
+        assert set(COMMAND_HELP) >= {
+            *PIPELINE_COMMANDS,
+            *SIMPLE_COMMANDS,
+            RAW_PREFIX,
+        }
+
+
+class TestQuietVisualizer:
+    def test_system_prompt_and_user_messages_hidden_agent_text_shown(self, capsys):
+        from openhands.sdk.event import MessageEvent, SystemPromptEvent
+        from openhands.sdk.llm import Message, TextContent
+
+        from vyvcode.quiet import quiet_visualizer
+
+        visualizer = quiet_visualizer()
+        visualizer.on_event(
+            SystemPromptEvent(
+                source="agent",
+                system_prompt=TextContent(text="SECRET SYSTEM PROMPT"),
+                tools=[],
+            )
+        )
+        visualizer.on_event(
+            MessageEvent(
+                source="user",
+                llm_message=Message(
+                    role="user", content=[TextContent(text="USER SAID THIS")]
+                ),
+            )
+        )
+        visualizer.on_event(
+            MessageEvent(
+                source="agent",
+                llm_message=Message(
+                    role="assistant", content=[TextContent(text="AGENT ANSWER")]
+                ),
+            )
+        )
+
+        shown = capsys.readouterr().out
+        assert "SECRET SYSTEM PROMPT" not in shown
+        assert "USER SAID THIS" not in shown
+        assert "AGENT ANSWER" in shown

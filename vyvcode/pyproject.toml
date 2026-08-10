@@ -34,6 +34,12 @@ build-backend = "hatchling.build"
 [tool.hatch.build.targets.wheel]
 packages = ["vyvcode"]
 
+# The checkout keeps agents/ and skills/ beside the package; the wheel ships
+# them inside it. vyvcode/assets.py resolves whichever layout is present.
+[tool.hatch.build.targets.wheel.force-include]
+"agents" = "vyvcode/agents"
+"skills" = "vyvcode/skills"
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = "-q"

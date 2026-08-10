@@ -11,7 +11,7 @@ from vyvcode.config import VyvConfig
 
 BANNER = (
     f"vyvcode {__version__} — /vyvcode:brainstorm /plan /goal /vyvcode:grill "
-    "/memory-recall /vyvcode:status /vyvcode:stop !raw · Ctrl-D exits"
+    "/memory-recall /vyvcode:status /vyvcode:stop !raw · exit/Ctrl-D exits"
 )
 
 
@@ -21,6 +21,8 @@ def repl_loop(lines: Iterable[str], handlers, out=print) -> None:
         parsed = parse_line(line)
         if parsed.kind == "empty":
             continue
+        if parsed.kind == "exit":
+            return
         try:
             message = execute(parsed, handlers)
         except KeyboardInterrupt:
@@ -33,15 +35,23 @@ def repl_loop(lines: Iterable[str], handlers, out=print) -> None:
             out(message)
 
 
-def _interactive_lines(history_path) -> Iterable[str]:
+def _interactive_lines(history_path, cfg: VyvConfig) -> Iterable[str]:
     from prompt_toolkit import PromptSession
     from prompt_toolkit.history import FileHistory
 
+    from vyvcode.tui import PROMPT, PROMPT_STYLE, SlashCompleter, bottom_toolbar
+
     history_path.parent.mkdir(parents=True, exist_ok=True)
-    session = PromptSession(history=FileHistory(str(history_path)))
+    session = PromptSession(
+        history=FileHistory(str(history_path)),
+        completer=SlashCompleter(),
+        complete_while_typing=True,
+        style=PROMPT_STYLE,
+        bottom_toolbar=lambda: bottom_toolbar(cfg),
+    )
     while True:
         try:
-            yield session.prompt("vyvcode> ")
+            yield session.prompt(PROMPT)
         except KeyboardInterrupt:
             continue  # Ctrl-C at an empty prompt: stay in the REPL
         except EOFError:
@@ -60,7 +70,7 @@ def run_repl(cfg: VyvConfig, do_probe: bool = True) -> int:
 
     handlers = Handlers(cfg, alive=alive)
     if sys.stdin.isatty():
-        lines = _interactive_lines(cfg.project_root / ".vyvcode" / "history")
+        lines = _interactive_lines(cfg.project_root / ".vyvcode" / "history", cfg)
     else:
         lines = (line.rstrip("\n") for line in sys.stdin)
     repl_loop(lines, handlers)

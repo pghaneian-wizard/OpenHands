@@ -42,6 +42,10 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main(argv: list[str] | None = None) -> int:
     os.environ.setdefault("OPENHANDS_SUPPRESS_BANNER", "1")
+
+    from vyvcode.quiet import silence_sdk_noise
+
+    silence_sdk_noise()  # must precede SDK imports: LOG_LEVEL is read at import time
     args = build_parser().parse_args(argv)
 
     from vyvcode.config import load_config
