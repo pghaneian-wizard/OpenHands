@@ -24,7 +24,9 @@ shell — that trust boundary is documented in ARCHITECTURE.md.
 from __future__ import annotations
 
 import json
+import os
 import random
+import signal
 import subprocess
 import time
 from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
@@ -32,6 +34,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from vyvcode.config import VyvConfig
+from vyvcode.live import SwarmMonitor, token_reporter
 from vyvcode.models import coder_llm
 from vyvcode.run_state import slugify
 from vyvcode.subagents import agent_prompt, run_agent_task
@@ -165,17 +168,35 @@ def _require_clean_base(root: Path) -> str:
     return branch
 
 
+def _kill_group(proc) -> None:
+    """SIGKILL the command's whole process group, then reap it."""
+    try:
+        os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+    except (ProcessLookupError, PermissionError, OSError):
+        proc.kill()
+
+
 def _run_shell(command: str, cwd: Path) -> dict:
     """Planner-authored acceptance line: deliberate shell=True trust boundary."""
+    # Own session: on timeout Python kills only the shell it spawned, leaving
+    # a test runner's children alive and holding the worktree open.
+    proc = subprocess.Popen(
+        command, shell=True, cwd=cwd, stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT, text=True, errors="replace",
+        start_new_session=True,
+    )
     try:
-        proc = subprocess.run(
-            command, shell=True, cwd=cwd, capture_output=True, text=True,
-            timeout=ACCEPTANCE_TIMEOUT, check=False,
-        )
-        output = (proc.stdout + proc.stderr)[-2000:]
-        return {"cmd": command, "passed": proc.returncode == 0, "output": output}
+        output = proc.communicate(timeout=ACCEPTANCE_TIMEOUT)[0] or ""
+        return {
+            "cmd": command,
+            "passed": proc.returncode == 0,
+            "output": output[-2000:],
+        }
     except subprocess.TimeoutExpired:
-        return {"cmd": command, "passed": False, "output": "timeout"}
+        _kill_group(proc)
+        output = proc.communicate()[0] or ""
+        return {"cmd": command, "passed": False,
+                "output": ("timeout\n" + output)[-2000:]}
 
 
 # ── completion gate (§10.4) ──────────────────────────────────────────────────
@@ -222,15 +243,17 @@ def verify_phase(worktree: Path, phase) -> tuple[bool, PhaseOutcome]:
 # ── coder invocation ─────────────────────────────────────────────────────────
 
 
-def default_coder_runner(cfg: VyvConfig):
+def default_coder_runner(cfg: VyvConfig, monitor=None):
     def runner(prompt: str, workspace: Path, phase_id: str) -> str:
+        llm = coder_llm(cfg, phase_id)
         return run_agent_task(
-            coder_llm(cfg, phase_id),
+            llm,
             system_prompt=agent_prompt("vyvcode-coder"),
             task=prompt,
             workspace=workspace,
             tools=CODER_TOOLS,
             max_iterations=cfg.coder_max_iter,
+            on_event=token_reporter(llm, monitor, phase_id),
         )
 
     return runner
@@ -394,6 +417,7 @@ def execute_swarm(
     coder_runner=None,
     integration_runner=None,
     sleep_fn=time.sleep,
+    monitor=None,
 ) -> SwarmOutcome:
     root = cfg.project_root
     base_branch = _require_clean_base(root)
@@ -412,7 +436,11 @@ def execute_swarm(
     _git(integration_dir, "add", "docs/vyvcode/plans")
     _git(integration_dir, "commit", "-m", f"vyvcode: MasterPlan for {run.run_id}")
 
-    coder_runner = coder_runner or default_coder_runner(cfg)
+    monitor = monitor or SwarmMonitor(out=out)
+    for pid, phase in plan.phases.items():
+        monitor.register(pid, phase.name)
+    out = monitor.log  # keep progress lines above the live panel
+    coder_runner = coder_runner or default_coder_runner(cfg, monitor)
     integration_runner = integration_runner or default_integration_runner(cfg)
     brief_md = (run.dir / "BRIEF.md").read_text() if (run.dir / "BRIEF.md").is_file() else ""
 
@@ -444,7 +472,7 @@ def execute_swarm(
             deps = plan.phases[pid].depends_on
             if any(d in dead_set() for d in deps):
                 mark(pid, "SKIPPED")
-                out(f"{pid} skipped (dead dependency)")
+                monitor.finish(pid, "skipped")
                 continue
             if all(d in merged for d in deps):
                 ready.append(pid)
@@ -468,6 +496,7 @@ def execute_swarm(
 
     executor = ThreadPoolExecutor(max_workers=cfg.max_parallel_coders)
     in_flight: dict = {}
+    monitor.__enter__()
     try:
         while True:
             if run.is_aborted:
@@ -486,7 +515,7 @@ def execute_swarm(
                 failure = outcomes[pid].notes[-1] if outcomes[pid].notes else None
                 outcomes[pid].attempts += 1
                 mark(pid, "DISPATCHED")
-                out(f"{pid} {phase.name} ▸ building (attempt {outcomes[pid].attempts})")
+                monitor.start(pid, phase.name, outcomes[pid].attempts)
                 in_flight[executor.submit(build_phase, pid, failure)] = pid
 
             if not in_flight:
@@ -512,21 +541,22 @@ def execute_swarm(
                         plan, outcomes[pid], outcome.merged, integration_runner, out,
                     ):
                         mark(pid, "MERGED")
-                        out(f"{pid} {phase.name} ▸ tests green ▸ merged")
+                        monitor.finish(pid, "merged")
                         continue
                     ok = False  # merge-level failure falls through to retry logic
 
                 if outcomes[pid].attempts >= 2:
                     mark(pid, "RETRY_EXHAUSTED")
-                    out(f"{pid} {phase.name} ▸ RETRY_EXHAUSTED")
+                    monitor.finish(pid, "exhausted")
                 else:
                     mark(pid, "PENDING")  # retried on the next scheduling pass
-                    out(f"{pid} {phase.name} ▸ failed, retrying")
+                    monitor.finish(pid, "retrying")
                     _git(root, "worktree", "remove", "--force",
                          str(worktrees_dir / pid), check=False)
                     _git(root, "branch", "-D", phase.worktree_branch, check=False)
     finally:
         executor.shutdown(wait=True)
+        monitor.__exit__(None, None, None)
 
     # Full Phase-F suite on integration after the last merge (§10.5).
     final_ids = [p for p in plan.order if p.upper() in ("F", "PF")]

@@ -57,7 +57,14 @@ def _place(dest: Path, content: bytes, log: list[str]) -> None:
         if _digest(dest.read_bytes()) == _digest(content):
             log.append(f"skip {dest} (identical)")
             return
+        # Never overwrite an existing backup: the first one holds the user's
+        # own edits, and a later config change re-renders the file and would
+        # otherwise replace those edits with our own previous output.
         backup = dest.with_suffix(dest.suffix + ".bak")
+        counter = 1
+        while backup.exists():
+            counter += 1
+            backup = dest.with_suffix(f"{dest.suffix}.bak{counter}")
         backup.write_bytes(dest.read_bytes())
         log.append(f"backup {dest} -> {backup.name}")
     dest.parent.mkdir(parents=True, exist_ok=True)

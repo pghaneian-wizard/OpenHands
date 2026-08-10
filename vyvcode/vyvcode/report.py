@@ -16,11 +16,15 @@ def _brief_field(brief_md: str, key: str) -> str:
 
 
 def _brief_list(brief_md: str, key: str) -> list[str]:
-    match = re.search(rf"(?m)^{key}:.*\n((?:[ \t]+-.*\n?)*)", brief_md)
+    # The BRIEF is model-authored, so the list items may or may not be
+    # indented under their key; both forms are the same list.
+    match = re.search(rf"(?m)^{key}:.*\n((?:[ \t]*-.*\n?)*)", brief_md)
     if not match:
         return []
     return [
-        line.strip().lstrip("- ").strip()
+        # removeprefix, not lstrip: "- --dry-run defaults to on" is an item
+        # whose text starts with a dash and must survive intact.
+        line.strip().removeprefix("-").strip()
         for line in match.group(1).splitlines()
         if line.strip().startswith("-")
     ]

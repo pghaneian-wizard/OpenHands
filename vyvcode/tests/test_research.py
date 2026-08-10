@@ -147,6 +147,20 @@ class TestSummaryParser:
     def test_truncated_block_still_crash_without_val_bpb(self):
         assert parse_summary("training_seconds: 300.0\ndepth: 8\n") is None
 
+    def test_final_summary_wins_over_an_earlier_progress_line(self):
+        # train.py is rewritten by the researcher every experiment; once it
+        # logs an interim val_bpb the first match is a step-0 value, which
+        # would be recorded as a huge regression (or a fake record).
+        interim = "val_bpb: 4.100000\n" + GOLDEN_SUMMARY
+
+        assert parse_summary(interim)["val_bpb"] == 0.991234
+
+    def test_scientific_notation_is_a_value_not_a_crash(self):
+        log = GOLDEN_SUMMARY.replace("val_bpb:          0.991234",
+                                     "val_bpb:          9.9e-01")
+
+        assert parse_summary(log)["val_bpb"] == 0.99
+
     def test_noise_lines_do_not_confuse_anchoring(self):
         noisy = "note: val_bpb: 9.9 (interim)\n" + GOLDEN_SUMMARY
 

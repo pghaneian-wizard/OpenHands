@@ -13,7 +13,6 @@ from __future__ import annotations
 import json
 import re
 import subprocess
-from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 
 from vyvcode.config import VyvConfig
@@ -306,6 +305,9 @@ def review_loop(
 
     cycle = 1
     while cycle <= cfg.max_review_cycles:
+        # Persisted, so /vyvcode:status shows review progress and a crash
+        # mid-review leaves a record of how many cycles were consumed.
+        run.bump_cycle()
         cycle_dir = run.dir / "review" / f"cycle-{cycle}"
         cycle_dir.mkdir(parents=True, exist_ok=True)
         task = build_review_task(cfg, run, plan, swarm_outcome, cycle, suite)
@@ -361,17 +363,13 @@ def review_loop(
             f"dispatching {len(clusters)} fix cluster(s)"
         )
         run.to("FIXING")
-        parallel = [c for c in clusters if any(i.files for i in c)]
-        serial = [c for c in clusters if not any(i.files for i in c)]
-        with ThreadPoolExecutor(max_workers=cfg.max_parallel_coders) as pool:
-            futures = [
-                pool.submit(fix_runner, _fix_prompt(run, plan, c), f"c{cycle}-{n}")
-                for n, c in enumerate(parallel)
-            ]
-            for future in futures:
-                future.result()
-        for n, c in enumerate(serial):
-            fix_runner(_fix_prompt(run, plan, c), f"c{cycle}-s{n}")
+        # Serial by necessity: every fix coder is handed the same integration
+        # worktree and told to commit, so two at once contend on
+        # .git/index.lock and stage each other's half-written edits. The
+        # reviewer's per-issue file lists are advisory, not an isolation
+        # boundary like the phase worktrees the swarm hands out.
+        for n, cluster in enumerate(clusters):
+            fix_runner(_fix_prompt(run, plan, cluster), f"c{cycle}-{n}")
         run.to("REVIEWING")
 
         suite = suite_runner()

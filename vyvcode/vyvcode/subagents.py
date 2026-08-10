@@ -60,6 +60,7 @@ def run_agent_task(
     workspace: Path,
     tools: tuple[str, ...] = READ_ONLY_TOOLS,
     max_iterations: int | None = None,
+    on_event=None,
 ) -> str:
     from openhands.sdk import Agent, Conversation, Tool
     from openhands.sdk.security.confirmation_policy import NeverConfirm
@@ -75,6 +76,8 @@ def run_agent_task(
     kwargs: dict = {}
     if max_iterations is not None:
         kwargs["max_iteration_per_run"] = max_iterations
+    if on_event is not None:
+        kwargs["callbacks"] = [on_event]
     conversation = Conversation(
         agent=agent,
         workspace=str(workspace),

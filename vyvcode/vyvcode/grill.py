@@ -206,13 +206,14 @@ def run_grill(
             )
 
         if _QUESTION_MARK not in reply:
-            nudges += 1
+            nudges += 1  # reset below once a well-formed round arrives
             if nudges > 2:
                 raise GrillError("model failed to follow the round protocol")
             history.append(_msg("user", _NUDGE))
             transcript.append(f"\n## harness\n{_NUDGE}")
             continue
 
+        nudges = 0  # a lifetime budget would abort a long, healthy interview
         rounds += 1
         if forced:
             # Cap directive already sent; the model asked again instead of
@@ -267,7 +268,7 @@ def standalone(cfg: VyvConfig, topic: str, ask_user=None, out=print) -> str:
     )
     result = run_grill(
         cfg, llm_for("communicator", cfg), seed, mode="grill",
-        ask_user=ask_user, out=out,
+        ask_user=ask_user, out=out, rounds_cap=cfg.grill_rounds_plan,
     )
     stamp = _dt.datetime.now(_dt.UTC).strftime("%Y%m%d_%H%M%S")
     dest = cfg.project_root / ".vyvcode" / "grill" / f"{stamp}_{slugify(topic)}.md"

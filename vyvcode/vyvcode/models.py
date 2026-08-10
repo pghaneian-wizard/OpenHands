@@ -20,7 +20,9 @@ from openhands.sdk.llm.llm_profile_store import LLMProfileStore
 from vyvcode.config import ROLES, VyvConfig, redact
 
 PROBE_PROMPT = "Reply with the single word: ok"
-PROBE_MAX_TOKENS = 16
+# Extended-thinking models derive their thinking budget from this value and
+# reject a budget under 1024, so a tiny cap fails models that actually work.
+PROBE_MAX_TOKENS = 1100
 
 
 def llm_for(
@@ -110,7 +112,16 @@ def probe_role(cfg: VyvConfig, role: str) -> ProbeResult:
             error=f"no API key: {r.api_key_env} is not set",
             suggestion=f"set {r.api_key_env} in the environment or .env",
         )
-    llm = llm_for(role, cfg, max_output_tokens=PROBE_MAX_TOKENS)
+    try:
+        llm = llm_for(role, cfg, max_output_tokens=PROBE_MAX_TOKENS)
+    except Exception as exc:  # a bad fallback spec must not kill the whole probe
+        return ProbeResult(
+            role=role,
+            model=r.model,
+            ok=False,
+            error=redact(str(exc), cfg.secret_values),
+            suggestion=_suggestion_for(role, r.model),
+        )
     start = time.monotonic()
     try:
         llm.completion(

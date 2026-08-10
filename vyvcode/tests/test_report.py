@@ -59,6 +59,20 @@ def synthetic_env(tmp_path):
     return cfg, run, plan, swarm, review
 
 
+class TestBriefParsing:
+    def test_flag_named_assumption_survives_and_unindented_items_are_found(
+        self, tmp_path
+    ):
+        from vyvcode.report import _brief_list
+
+        brief = "assumed:\n- --dry-run defaults to on\n  - api: CLI-only\n"
+
+        assert _brief_list(brief, "assumed") == [
+            "--dry-run defaults to on",
+            "api: CLI-only",
+        ]
+
+
 class TestRedaction:
     def test_secret_carried_in_the_brief_never_reaches_the_report(
         self, tmp_path

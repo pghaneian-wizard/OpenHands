@@ -110,6 +110,60 @@ class TestScheduler:
         ).stdout.split()
         assert {"core.py", "auth.py", "api.py", "main.py"} <= set(listing)
 
+    def test_acceptance_timeout_kills_the_whole_process_tree(self, repo, monkeypatch):
+        import time as _time
+
+        import vyvcode.swarm as swarm_mod
+
+        monkeypatch.setattr(swarm_mod, "ACCEPTANCE_TIMEOUT", 1)
+        marker = repo / "orphan-was-alive"
+        # The shell backgrounds a child that outlives it, the way a test
+        # runner spawning a dev server does. Killing only the shell leaves
+        # that child running against the phase worktree.
+        command = f"(sleep 2; touch {marker}) & sleep 30"
+
+        result = swarm_mod._run_shell(command, repo)
+        _time.sleep(3)  # past the moment the orphan would have done its work
+
+        assert result["passed"] is False
+        assert "timeout" in result["output"]
+        assert not marker.exists()
+
+    def test_monitor_reports_per_phase_status_and_spend(self, repo):
+        from vyvcode.live import SwarmMonitor, token_reporter
+
+        cfg = load_config(repo, env={"VYVCODE_MAX_PARALLEL_CODERS": "2"})
+        run = make_run(cfg)
+        plan = parse_masterplan(DIAMOND)
+        printed = []
+        monitor = SwarmMonitor(out=printed.append, enabled=False)
+
+        class FakeLLM:
+            class metrics:
+                accumulated_cost = 0.25
+
+                class accumulated_token_usage:
+                    prompt_tokens = 900
+                    completion_tokens = 100
+
+        def runner(prompt, worktree, phase_id):
+            report = token_reporter(FakeLLM(), monitor, phase_id)
+            report(object())  # one SDK event
+            filename = {"P1": "core.py", "P2": "auth.py",
+                        "P3": "api.py", "P4": "main.py"}[phase_id]
+            (worktree / filename).write_text(f"# {phase_id}\n")
+            commit_all(worktree, f"{phase_id} work")
+            write_report(worktree, phase_id)
+            return "done"
+
+        execute_swarm(cfg, run, plan, out=lambda _: None,
+                      coder_runner=runner, monitor=monitor)
+
+        assert {s.state for s in monitor.phases.values()} == {"merged"}
+        assert all(s.tokens == 1000 for s in monitor.phases.values())
+        assert all(s.elapsed > 0 for s in monitor.phases.values())
+        assert any("swarm total: 4.0k tokens" in line for line in printed)
+
     def test_build_artifacts_left_by_the_coder_do_not_fail_the_phase(self, repo):
         # The coder prompt orders it to run its own tests, which drops
         # __pycache__/ into the worktree. Untracked artifacts are not

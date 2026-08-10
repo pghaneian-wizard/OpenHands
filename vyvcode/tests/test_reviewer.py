@@ -1,6 +1,7 @@
 """Reviewer loop: fix waves, malformed verdicts, escalation, minors (§11)."""
 
 import json
+import time
 from pathlib import Path
 
 import pytest
@@ -133,6 +134,62 @@ class TestLoop:
         )
 
         assert outcome.approved is False
+
+    def test_fix_coders_never_run_concurrently_in_the_shared_worktree(self, env):
+        # Every fix coder gets the same integration worktree and is told to
+        # commit; two of them at once contend on .git/index.lock and stage
+        # each other's half-written edits.
+        import threading
+
+        cfg, run, plan, swarm = env
+        lock = threading.Lock()
+        active = 0
+        max_active = 0
+
+        def fix_runner(prompt, cluster_id):
+            nonlocal active, max_active
+            with lock:
+                active += 1
+                max_active = max(max_active, active)
+            time.sleep(0.02)
+            with lock:
+                active -= 1
+            return "fixed"
+
+        reviews = [
+            verdict_json("CHANGES_REQUIRED", [
+                issue("R1", "blocker", ["a.py"]),
+                issue("R2", "blocker", ["b.py"]),
+                issue("R3", "blocker", ["c.py"]),
+            ], cycle=1),
+            verdict_json("APPROVED", [], cycle=2),
+        ]
+        outcome = review_loop(
+            cfg, run, plan, swarm, out=lambda _: None,
+            reviewer_runner=lambda prompt: reviews.pop(0),
+            fix_runner=fix_runner,
+            suite_runner=lambda: GREEN,
+        )
+
+        assert outcome.approved is True
+        assert max_active == 1
+
+    def test_review_cycle_count_is_persisted_for_status(self, env):
+        cfg, run, plan, swarm = env
+        reviews = [
+            verdict_json("CHANGES_REQUIRED", [issue("R1", "blocker", ["a.py"])], cycle=1),
+            verdict_json("APPROVED", [], cycle=2),
+        ]
+
+        review_loop(
+            cfg, run, plan, swarm, out=lambda _: None,
+            reviewer_runner=lambda prompt: reviews.pop(0),
+            fix_runner=lambda prompt, cid: "fixed",
+            suite_runner=lambda: GREEN,
+        )
+
+        assert Run.load(run.dir).review_cycle == 2
+        assert "review cycle: 2" in Run.load(run.dir).render_status()
 
     def test_two_changes_required_then_approved_drives_two_fix_waves(self, env):
         cfg, run, plan, swarm = env

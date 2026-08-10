@@ -293,9 +293,14 @@ def parse_summary(log_text: str) -> dict | None:
     """Nine anchored fields from run.log; no val_bpb line ⇒ crash (None)."""
     fields: dict[str, float | int] = {}
     for name in SUMMARY_FIELDS:
-        match = re.search(rf"(?m)^{name}:\s+([\d.]+)\s*$", log_text)
-        if match:
-            value = float(match.group(1))
+        # Last match, not first: train.py belongs to the researcher, and once
+        # it logs an interim value the first hit is a step-0 number. The value
+        # pattern also accepts exponents and signs, which float() handles.
+        matches = re.findall(
+            rf"(?m)^{name}:\s+([-+]?[\d.]+(?:[eE][-+]?\d+)?)\s*$", log_text
+        )
+        if matches:
+            value = float(matches[-1])
             fields[name] = int(value) if name in _INT_FIELDS else value
     if "val_bpb" not in fields:
         return None
@@ -935,6 +940,12 @@ def run_loop(cfg: VyvConfig, ar_dir: Path, session: ResearchSession, out=print,
             out(f"harness error (experiment discarded, loop continues): {exc}")
             continue
 
+        # An immediate stop must not be followed by a strategist pass: that
+        # is another agent run, a program.md rewrite, and a commit after the
+        # user asked the loop to halt.
+        session.reload_stop_only()
+        if session.state.get("stop") == "now":
+            break
         _maybe_strategist(cfg, session, strategist_fn, out)
         warning = session.size_warning()
         if warning:
@@ -1016,6 +1027,10 @@ def run_experiment(cfg: VyvConfig, ar_dir: Path, session: ResearchSession,
             "hypothesis": hypothesis, "decision": "aborted",
             "reason": "stop --now",
         })
+        # The pgid was cleared above but this path never reaches _record's
+        # save(); leaving it on disk lets a later stop --now SIGKILL whatever
+        # process the kernel has since given that id.
+        session.save()
         return
 
     # 4/5 ▸ decide per upstream rules (§5.5)

@@ -27,15 +27,36 @@ def silence_sdk_noise() -> None:
         warnings.filterwarnings("ignore", message=pattern)
 
 
+_CONSOLE = None
+
+
+def shared_console():
+    """One rich Console for agent output and the live panel.
+
+    Two Consoles writing to the same terminal corrupt each other's cursor
+    handling, so the swarm's live table and the SDK visualizer must share one.
+    """
+    global _CONSOLE
+    if _CONSOLE is None:
+        from rich.console import Console
+
+        _CONSOLE = Console()
+    return _CONSOLE
+
+
 def quiet_visualizer():
     """Default visualizer minus the system-prompt dump and user-message echo."""
     from openhands.sdk.conversation.visualizer import DefaultConversationVisualizer
     from openhands.sdk.event import SystemPromptEvent
 
     class QuietVisualizer(DefaultConversationVisualizer):
+        def __init__(self) -> None:
+            super().__init__(skip_user_messages=True)
+            self._console = shared_console()
+
         def on_event(self, event) -> None:
             if isinstance(event, SystemPromptEvent):
                 return
             super().on_event(event)
 
-    return QuietVisualizer(skip_user_messages=True)
+    return QuietVisualizer()
