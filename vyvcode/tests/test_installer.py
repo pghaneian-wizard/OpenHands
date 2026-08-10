@@ -8,6 +8,8 @@ AGENT_NAMES = (
     "vyvcode-masterplanner",
     "vyvcode-coder",
     "vyvcode-reviewer",
+    "vyvcode-researcher",
+    "vyvcode-strategist",
 )
 SKILL_NAMES = ("vyvcode-grill", "vyvcode-brainstorm", "stop-slop")
 

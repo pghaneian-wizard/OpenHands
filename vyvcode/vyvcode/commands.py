@@ -28,7 +28,12 @@ SIMPLE_COMMANDS = {
     "/memory-recall": "memory",
     "/vyvcode:status": "status",
     "/vyvcode:stop": "stop",
+    "/vyvcode:autoresearch": "autoresearch",
 }
+
+# Common typo: /vyvecode:* is a silent alias of /vyvcode:*.
+ALIAS_PREFIX = "/vyvecode:"
+CANONICAL_PREFIX = "/vyvcode:"
 
 
 def known_commands() -> list[str]:
@@ -50,6 +55,8 @@ def parse_line(line: str) -> Parsed:
         return Parsed("raw", stripped[len(RAW_PREFIX) :].strip())
     if stripped.startswith("/"):
         token, _, rest = stripped.partition(" ")
+        if token.startswith(ALIAS_PREFIX):
+            token = CANONICAL_PREFIX + token[len(ALIAS_PREFIX) :]
         if token in PIPELINE_COMMANDS:
             return Parsed("pipeline", rest.strip(), mode=PIPELINE_COMMANDS[token])
         if token in SIMPLE_COMMANDS:
@@ -141,6 +148,11 @@ class Handlers:
             return "no active run"
         return f"aborted {run_id}; worktrees preserved for inspection"
 
+    def autoresearch(self, arg: str) -> str | None:
+        from vyvcode.research import dispatch
+
+        return dispatch(self.cfg, arg)
+
     def unknown(self, cmd: str) -> str:
         return f"unknown command {cmd}. Valid: {', '.join(known_commands())}"
 
@@ -156,7 +168,7 @@ def execute(parsed: Parsed, handlers) -> str | None:
         return handlers.chat(parsed.arg)
     if parsed.kind == "unknown":
         return handlers.unknown(parsed.arg)
-    if parsed.kind in ("grill", "memory"):
+    if parsed.kind in ("grill", "memory", "autoresearch"):
         return getattr(handlers, parsed.kind)(parsed.arg)
     if parsed.kind in ("status", "stop"):
         return getattr(handlers, parsed.kind)()

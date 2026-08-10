@@ -20,7 +20,9 @@ from pathlib import Path
 
 from dotenv import dotenv_values
 
-ROLES = ("communicator", "planner", "coder", "reviewer")
+ROLES = ("communicator", "planner", "coder", "reviewer")  # startup-probed
+EXTRA_ROLES = ("researcher", "strategist")  # probed lazily (autoresearch only)
+ALL_ROLES = ROLES + EXTRA_ROLES
 
 _ROLE_DEFAULTS: dict[str, dict[str, str | None]] = {
     "communicator": {
@@ -47,6 +49,30 @@ _ROLE_DEFAULTS: dict[str, dict[str, str | None]] = {
         "key_env": "ANTHROPIC_API_KEY",
         "base_url": None,
     },
+    "researcher": {
+        "model": "openai/kimi-k3",
+        "effort": "max",
+        "key_env": "MOONSHOT_API_KEY",
+        "base_url": "https://api.moonshot.ai/v1",
+    },
+    "strategist": {
+        "model": "anthropic/claude-fable-5",
+        "effort": "max",
+        "key_env": "ANTHROPIC_API_KEY",
+        "base_url": None,
+    },
+}
+
+# Autoresearch knobs (addendum §4.1): env var suffix -> (default, parser)
+_AR_KNOB_DEFAULTS: dict[str, tuple[object, str]] = {
+    "AR_REPO": ("https://github.com/karpathy/autoresearch", "str"),
+    "AR_DIR": ("~/autoresearch", "str"),
+    "AR_MAX_EXPERIMENTS": (0, "int"),
+    "AR_MAX_HOURS": (0.0, "float"),
+    "AR_STRATEGY_EVERY": (10, "int"),
+    "AR_EPSILON": (0.0, "float"),
+    "AR_RUN_TIMEOUT_MIN": (10.0, "float"),
+    "AR_CRASH_STREAK_LIMIT": (3, "int"),
 }
 
 # Orchestration knobs: env var suffix -> (default, parser)
@@ -94,6 +120,14 @@ class VyvConfig:
     memory_enabled: bool
     memsearch_provider: str = "onnx"
     memsearch_model: str = "gpahal/bge-m3-onnx-int8"
+    ar_repo: str = "https://github.com/karpathy/autoresearch"
+    ar_dir: Path = Path("~/autoresearch")
+    ar_max_experiments: int = 0
+    ar_max_hours: float = 0.0
+    ar_strategy_every: int = 10
+    ar_epsilon: float = 0.0
+    ar_run_timeout_min: float = 10.0
+    ar_crash_streak_limit: int = 3
     secret_values: tuple[str, ...] = field(default=(), repr=False)
 
     @property
@@ -116,7 +150,9 @@ def _toml_lookup(toml_cfg: Mapping, env_name: str) -> str | None:
     suffix = env_name[len("VYVCODE_") :]
     if suffix == "MEMORY":
         section, key = "memory", "enabled"
-    elif suffix.split("_", 1)[0].lower() in ROLES:
+    elif suffix.startswith("AR_"):
+        section, key = "research", suffix[len("AR_") :].lower()
+    elif suffix.split("_", 1)[0].lower() in ALL_ROLES:
         section, key = "models", suffix.lower()
     else:
         section, key = "orchestration", suffix.lower()
@@ -175,7 +211,7 @@ def load_config(
         return default
 
     roles: dict[str, RoleConfig] = {}
-    for role in ROLES:
+    for role in ALL_ROLES:
         d = _ROLE_DEFAULTS[role]
         prefix = f"VYVCODE_{role.upper()}"
         model = get(f"{prefix}_MODEL", d["model"])
@@ -208,6 +244,18 @@ def load_config(
         else:
             knobs[suffix] = raw
 
+    ar_knobs: dict[str, object] = {}
+    for suffix, (default, kind) in _AR_KNOB_DEFAULTS.items():
+        raw = get(f"VYVCODE_{suffix}")
+        if raw is None:
+            ar_knobs[suffix] = default
+        elif kind == "int":
+            ar_knobs[suffix] = int(raw)
+        elif kind == "float":
+            ar_knobs[suffix] = float(raw)
+        else:
+            ar_knobs[suffix] = raw
+
     memory_raw = get("VYVCODE_MEMORY", "true") or "true"
     secrets = tuple(
         sorted({r.api_key for r in roles.values() if r.api_key and len(r.api_key) >= 8})
@@ -231,6 +279,14 @@ def load_config(
         memsearch_model=get_clearable(
             "VYVCODE_MEMSEARCH_MODEL", "gpahal/bge-m3-onnx-int8"
         ) or "",
+        ar_repo=ar_knobs["AR_REPO"],  # type: ignore[arg-type]
+        ar_dir=Path(str(ar_knobs["AR_DIR"])).expanduser(),
+        ar_max_experiments=ar_knobs["AR_MAX_EXPERIMENTS"],  # type: ignore[arg-type]
+        ar_max_hours=ar_knobs["AR_MAX_HOURS"],  # type: ignore[arg-type]
+        ar_strategy_every=ar_knobs["AR_STRATEGY_EVERY"],  # type: ignore[arg-type]
+        ar_epsilon=ar_knobs["AR_EPSILON"],  # type: ignore[arg-type]
+        ar_run_timeout_min=ar_knobs["AR_RUN_TIMEOUT_MIN"],  # type: ignore[arg-type]
+        ar_crash_streak_limit=ar_knobs["AR_CRASH_STREAK_LIMIT"],  # type: ignore[arg-type]
         secret_values=secrets,
     )
 

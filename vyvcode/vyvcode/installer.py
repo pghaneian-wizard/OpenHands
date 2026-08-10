@@ -25,6 +25,8 @@ def _stamps(cfg: VyvConfig) -> dict[str, str]:
         "{{PLANNER_MODEL}}": cfg.roles["planner"].model,
         "{{CODER_MODEL}}": cfg.roles["coder"].model,
         "{{REVIEWER_MODEL}}": cfg.roles["reviewer"].model,
+        "{{RESEARCHER_MODEL}}": cfg.roles["researcher"].model,
+        "{{STRATEGIST_MODEL}}": cfg.roles["strategist"].model,
         "{{CODER_MAX_ITER}}": str(cfg.coder_max_iter),
         "{{CODER_MAX_BUDGET}}": (
             "" if cfg.coder_max_budget is None else str(cfg.coder_max_budget)
