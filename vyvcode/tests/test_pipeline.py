@@ -71,3 +71,24 @@ class TestPipelineGlue:
 
         assert "plan rejected twice" in closing
         assert latest_run(cfg.runs_dir).state == "ABORTED"
+
+    def test_unexpected_crash_marks_run_aborted_not_stranded(self, tmp_path):
+        import pytest
+
+        cfg = load_config(tmp_path, env={})
+
+        def exploding_planner(task):
+            raise RuntimeError("boom mid-pipeline")
+
+        with pytest.raises(RuntimeError, match="boom mid-pipeline"):
+            run_pipeline(
+                cfg,
+                mode="goal",
+                raw_text="tiny goal",
+                ask_user=lambda: "",
+                out=lambda _: None,
+                communicator=ScriptedChatLLM([TERMINAL]),
+                planner_runner=exploding_planner,
+            )
+
+        assert latest_run(cfg.runs_dir).state == "ABORTED"

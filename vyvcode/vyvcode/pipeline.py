@@ -16,7 +16,7 @@ from vyvcode.grill import gather_context, run_grill
 from vyvcode.models import llm_for
 from vyvcode.optimizer import optimize
 from vyvcode.planner import PlanValidationError, generate_plan
-from vyvcode.run_state import Run, slugify
+from vyvcode.run_state import TERMINAL_STATES, Run, slugify
 
 GRILL_CAPS_BY_MODE = {"brainstorm": None, "plan": "plan", "goal": "goal"}
 
@@ -142,6 +142,12 @@ def run_pipeline(
 
     except PipelineAborted:
         return f"run {run.run_id} aborted; artifacts in {run.dir}"
+    except BaseException:
+        # Crash (or Ctrl-C): don't strand the run mid-flight — it would block
+        # every future pipeline until manually stopped.
+        if run.state not in TERMINAL_STATES:
+            run.to("ABORTED")
+        raise
 
 
 def _memory_block(cfg: VyvConfig, query: str) -> str:

@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import datetime as _dt
 import json
+import os
 import re
 from pathlib import Path
 
@@ -79,6 +80,7 @@ class Run:
             self._data = {
                 "run_id": self.run_id,
                 "state": "IDLE",
+                "pid": os.getpid(),  # owner process; active_run checks liveness
                 "goal": goal_text,
                 "created": _dt.datetime.now(_dt.UTC).isoformat(timespec="seconds"),
                 "updated": None,
@@ -188,12 +190,31 @@ def latest_run(runs_dir: Path) -> Run | None:
     return runs[-1] if runs else None
 
 
+def _pid_alive(pid) -> bool:
+    if not isinstance(pid, int) or pid <= 0:
+        return False
+    try:
+        os.kill(pid, 0)
+    except (ProcessLookupError, OverflowError):
+        return False
+    except PermissionError:
+        return True  # exists, owned by someone else
+    return True
+
+
 def active_run(runs_dir: Path) -> Run | None:
-    """Newest run still mid-flight, if any (one active pipeline at a time)."""
+    """Newest run still mid-flight, if any (one active pipeline at a time).
+
+    A non-terminal run whose owning process is gone is a crash leftover:
+    mark it ABORTED so it stops blocking new runs.
+    """
     run = latest_run(runs_dir)
-    if run is not None and run.state not in TERMINAL_STATES:
-        return run
-    return None
+    if run is None or run.state in TERMINAL_STATES:
+        return None
+    if not _pid_alive(run._data.get("pid")):
+        run.to("ABORTED")
+        return None
+    return run
 
 
 def abort_active(runs_dir: Path) -> str | None:

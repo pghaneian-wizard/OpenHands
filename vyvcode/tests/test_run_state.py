@@ -73,6 +73,23 @@ class TestHelpers:
 
         assert active_run(tmp_path).run_id == live.run_id
 
+    def test_active_run_clears_run_whose_process_died(self, tmp_path):
+        crashed = Run(tmp_path, "crashy")
+        crashed.to("GRILL")
+        crashed._data["pid"] = 999999999  # guaranteed-dead pid
+        crashed._save()
+
+        assert active_run(tmp_path) is None
+        assert Run.load(crashed.dir).state == "ABORTED"
+
+    def test_active_run_clears_legacy_run_without_pid(self, tmp_path):
+        stale = Run(tmp_path, "old-format")
+        stale.to("GRILL")
+        del stale._data["pid"]
+        stale._save()
+
+        assert active_run(tmp_path) is None
+
     def test_abort_active_and_status_render(self, tmp_path):
         assert render_status(tmp_path) == "IDLE — no runs yet"
         assert abort_active(tmp_path) is None
