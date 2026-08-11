@@ -6,7 +6,7 @@ One clone of `pghaneian-wizard/OpenHands` carries two unrelated products. Knowin
 
 | | Workstream | Where | State |
 |---|---|---|---|
-| **A** | **VyvCode** — multi-model CLI coding agent (Python) | branch `vyvcode-build`, directory `vyvcode/` | built, hardened, live status UI, 197 tests green, pushed, deployed, all four roles live |
+| **A** | **VyvCode** — multi-model CLI coding agent (Python) | branch `vyvcode-build`, directory `vyvcode/` | built, hardened, live status UI, 209 tests green, pushed, deployed, all four roles live |
 | **B** | **Vyvcode Agent Canvas** — OpenHands → Vyvcode rebrand of the TS app | working tree + index on `main` | complete and verified, **still uncommitted** |
 
 **The one rule:** never mix them in a commit. B sits as ~700 modified files plus 8 staged renames in the index, so a bare `git commit`, a bare `--amend`, or `git add -A` sweeps the whole rebrand into whatever you were committing. Every A commit was made with `git commit --only <paths>`. Keep doing that — details in `CLAUDE.md`.
@@ -87,15 +87,22 @@ communicator gpt-5.6-sol 5.2k · coder kimi-k3 31.2k  |  36.4k tok $0.36
 Before anything has been spent it lists the configured model per role instead. During any run — pipeline or fast path — a panel stays pinned below the scrolling agent output:
 
 ```
-✧ Percolating… (2m14s · ↓ 36.4k tokens · coder kimi-k3 at max effort)
+✧ Percolating… (2m14s · ↓ 36.4k tokens · coder kimi-k3 at max effort)   ◎ /goal active (2m14s)
 ▰▰▰▰▰▰▰▰▰▰▰▰▰▱▱▱▱▱▱▱▱▱▱▱  4/7 EXECUTING
-  ⠹  P1 core   Burnishing…    2m14s   12.3k tok
-  ✔  P2 auth   merged         1m02s    8.1k tok
-  ⠹  P3 api    Levitating…      47s    3.4k tok
+  ⠹  coder kimi-k3  ·  P1 core   Burnishing…    2m14s   12.3k tok
+  ✔  coder kimi-k3  ·  P2 auth   merged         1m02s    8.1k tok
+  ⠹  coder kimi-k3  ·  P3 api    Levitating…      47s    3.4k tok
 communicator gpt-5.6-sol 5.2k · coder kimi-k3 31.2k  |  36.4k tok $0.36
 ```
 
-The activity word rotates every ~6 s out of 64 gerunds, seeded per phase so parallel coders never share one, with a shimmer band sweeping its letters. The bar's leading cell breathes, so a long stage never reads as stalled. Everything degrades to plain lines when stdout is not a terminal — which is what the tests and any piped run see.
+Four things carry information there:
+
+- **Each row names the agent and the work** — `role model  ·  <phase id> <phase name>`, and on the fast path the request text itself stands in for the phase (`coder kimi-k3  ·  task fix the parser`). The row used to read `task task`; the phase id was being joined to a name that repeated it, and nothing said which model was working.
+- **The mode badge** sits at the right margin whenever a slash command owns the session — `◎ /goal active (56s)`. The fast path has no mode and shows none.
+- **Token counts are coloured apart from the names** that carry them: role and model in grey70, the count in yellow, the session total in bold yellow, dollars in green. Scanning spend no longer means reading the whole line.
+- **The activity word** rotates every ~6 s out of 64 gerunds, seeded per phase so parallel coders never share one, with a shimmer band sweeping its letters. The bar's leading cell breathes, so a long stage never reads as stalled.
+
+Everything degrades to plain lines when stdout is not a terminal — which is what the tests and any piped run see.
 
 ## How a run works
 
@@ -105,7 +112,7 @@ The lifecycle, in the order the modules run:
 2. **`config.py`** — resolves settings with precedence `process env > <project>/.env > <project>/vyvcode.toml > defaults`, validates every numeric knob, and collects `secret_values` for redaction. Bad input fails at startup with a readable message instead of a stack trace mid-run.
 3. **`models.py`** — the single factory for every LLM in the app (`llm_for(role, cfg)`), plus the startup probe. Because every model is built here, `usage.py` registers each instance for accounting without any stage having to thread a counter through.
 4. **`repl.py` / `tui.py`** — prompt session, slash completion, the toolbar. Every command runs inside a catch-all: no exception, and no EOF at a nested prompt, can kill the session.
-5. **`commands.py`** — `parse_line()` produces a `Parsed` (kind + arg + mode); `execute()` dispatches. Handles exit words, `!raw`, the `/vyvecode:` alias, per-command role gating, and the single-active-run refusal. Plain chat takes the fast path here.
+5. **`commands.py`** — `parse_line()` produces a `Parsed` (kind + arg + mode); `execute()` dispatches. Handles exit words, `!raw`, the `/vyvecode:` alias, per-command role gating, and the single-active-run refusal. Plain chat takes the fast path here; `command_for_mode()` maps a pipeline mode back to the slash command the panel badge shows.
 6. **`optimizer.py`** — the communicator rewrites the message with stop-slop fusion, protecting literals behind placeholders and checking four guards before returning. Below `OPTIMIZER_MIN_TOKENS` it passes through.
 7. **`pipeline.py`** — creates the `Run`, opens the `RunMonitor` for the whole run, and walks the state machine, calling `monitor.stage()` at each transition: `IDLE → GRILL → BRIEF → PLANNING → [PLAN_GATE] → EXECUTING → MERGING → REVIEWING → [FIXING] → REPORTING → DONE`. Any exception, including Ctrl-C and EOF, marks the run `ABORTED` before propagating.
 8. **`grill.py`** — the interview. Unanswered facts become `NEEDS-FACT` requests handled by a coder-backed explorer with `glob`/`grep`/read access to the project; its findings are redacted before they reach any provider or disk.
@@ -114,7 +121,7 @@ The lifecycle, in the order the modules run:
 11. **`reviewer.py`** — reviews the integration branch, parses verdicts defensively, clusters fixes and dispatches them serially into one shared worktree (concurrent fix coders contend on `.git/index.lock`), and loops up to `MAX_REVIEW_CYCLES` before escalating.
 12. **`report.py` / `memory.py`** — the final report is rendered only from artifacts that exist on disk, redacted; the digest is written to memsearch memory for later `/memory-recall`.
 
-Cross-cutting: **`usage.py`** (session ledger; snapshots re-read each LLM's live metrics, so totals climb while an agent works), **`live.py`** (`RunMonitor`, activity words, progress bar, per-phase table), **`quiet.py`** (SDK noise suppression + the one shared rich console), **`assets.py` / `installer.py`** (agent definitions and vendored skills, resolved for both wheel and checkout layouts), **`subagents.py`**, **`research.py`** (the autoresearch loop, 1.4k lines — the largest module).
+Cross-cutting: **`usage.py`** (session ledger; snapshots re-read each LLM's live metrics, so totals climb while an agent works), **`live.py`** (`RunMonitor`: activity words, progress bar, mode badge, per-phase table, coloured spend line), **`quiet.py`** (SDK noise suppression + the one shared rich console), **`assets.py` / `installer.py`** (agent definitions and vendored skills, resolved for both wheel and checkout layouts), **`subagents.py`**, **`research.py`** (the autoresearch loop, 1.4k lines — the largest module).
 
 On disk, per project:
 
@@ -131,7 +138,7 @@ Everything is a `VYVCODE_*` env var, with a `vyvcode.toml` equivalent for the no
 
 ## Verification
 
-- `cd vyvcode && uv run pytest tests -q` — **197 passed**, no network, no GPU, ~17 s. 3.7k lines of tests against 5.8k lines of source.
+- `cd vyvcode && uv run pytest tests -q` — **209 passed**, no network, no GPU, ~17 s. 3.9k lines of tests against 5.9k lines of source.
 - `vyvcode --probe` from a project directory — **all four roles OK** on this box (communicator 1.6 s, planner 8.7 s, coder 4.4 s, reviewer 10.2 s on the last run).
 - pip-audit on the installed venv: no known vulnerabilities (setuptools forced ≥83 via `[tool.uv] override-dependencies` for PYSEC-2026-3447).
 
@@ -162,17 +169,20 @@ Each of these looks like a candidate for simplification and is not. All were bug
 | Explorer findings, typed answers and `report.md` go through `redact()` | The explorer reads `.env` when asked about configuration; the contents reach the provider and disk |
 | Whoever opens a `RunMonitor` closes it | Nested monitors either double-close or leak the live panel |
 | No panel style goes below `grey70` (`grey50` for the bar's tail) | `dim` and `bright_black` render near-invisible on most terminal themes |
+| A panel row's `Text` starts empty, with every style appended | A base style on the `Text` bleeds into every appended span, so the task text renders bold like the agent name |
 | Run ids are made unique against the runs directory | Two runs started in the same second share an id |
 
 ## How it got here
 
-30 commits on `main..vyvcode-build`. B0–B16 was the original build from PJ's runbook (one commit per phase, 2026-08-10); the rest is the hardening and UX session that followed.
+32 commits on `main..vyvcode-build`. B0–B16 was the original build from PJ's runbook (one commit per phase, 2026-08-10); the rest is the hardening and UX work that followed.
 
 The hardening pass was an audit: five parallel auditors read all 4.9k lines of source as it stood, ~60 findings came back, each verified against the source before any fix. 32 bugs fixed, 65 tests added (130 → 195) — the classes were silent corruption (the optimizer placeholder bug), runs that could not start or finish (stranded IDLE runs, truncated state, cross-terminal abort loss, pid recycling, id collisions, missing wheel assets, unregistered `glob`/`grep` killing the explorer, EOF and exceptions killing the REPL), wrong results (untracked-file gate, empty suite green, malformed reviewer JSON, repeated `depends_on` read as a cycle, autoresearch `parse_summary` matching researcher-added logging), and safety (prose-harvested commands, path escape, unredacted findings and report, orphaned acceptance children, `.git/index.lock` contention). The invariants table above is that audit's residue.
 
-The UX pass answered a plainer problem: the REPL was silent between "you pressed enter" and "the agent spoke", which on a multi-minute pipeline is indistinguishable from a hang. That produced `usage.py`, the toolbar spend line, and `live.py`.
+The UX work answered a plainer problem: the REPL was silent between "you pressed enter" and "the agent spoke", which on a multi-minute pipeline is indistinguishable from a hang. That produced `usage.py`, the toolbar spend line, and `live.py` — then a second pass on legibility (nothing below grey70) and a third on identity: rows that say which agent is doing which task, spend that reads at a glance, and a badge naming the mode that owns the session.
 
 ```
+8ef22fc28 vyvcode: panel rows name the agent and task, coloured token counts, mode badge
+ead618d29 vyvcode: fresh HANDOFF — one document, active product first
 bba948072 vyvcode: readable panel palette — nothing below grey70
 11c75b240 vyvcode: rewrite HANDOFF Part 2 for a fresh reader
 ae4a9511a vyvcode: refresh HANDOFF — status UI, 195 tests, module map
@@ -269,9 +279,10 @@ If you write another bulk rename, cover the escaped variants and re-run the suit
 3. **Autoresearch design items left deliberately unfixed.** They change documented behavior rather than fix a defect, so they are PJ's call: `setup` cuts the session branch from current HEAD instead of the default branch, so a re-run branches off the previous night's work; `_reset_to_best` runs `git clean -fd`, deleting untracked scratch files in the checkout; re-prompts (`REASK_HYPOTHESIS`, `GUARD_REPROMPT`, `STRATEGIST_RETRY`) go to fresh context-free conversations, so they cannot see what they are being asked to re-emit; `run.log` is untracked and not ignored upstream, so it is flagged as a guard offender after every keep.
 4. **tmux is not installed** — the SDK falls back to a subprocess terminal (the warning is now suppressed). `sudo apt-get install tmux` gives the coders a stabler terminal.
 5. `/home/pj/CLAUDE.md`'s subproject table does not list `vyvcode/` yet.
+6. **The fast-path row still carries its internal id** — it reads `coder kimi-k3  ·  task <your request>`, where `task` is the phase id the monitor keys on. Harmless, but it is one word of noise if the row layout gets another pass.
 
 **Workstream B (TS app)**
 
-6. **The rebrand is uncommitted** — decide squash vs. series and commit it on `main`.
-7. **`origin` still points at `pghaneian-wizard/OpenHands.git`.** Repoint, or add a `vyvcode` remote, when the repo gets its own home.
-8. `@vyvcode/agent-canvas` is unpublished, so the update check 404s; the container image is still `ghcr.io/openhands/agent-canvas`; `OH_*` env vars and `--oh-*` CSS vars were left alone; the logo SVGs are still upstream artwork; the backend is still upstream's.
+7. **The rebrand is uncommitted** — decide squash vs. series and commit it on `main`.
+8. **`origin` still points at `pghaneian-wizard/OpenHands.git`.** Repoint, or add a `vyvcode` remote, when the repo gets its own home.
+9. `@vyvcode/agent-canvas` is unpublished, so the update check 404s; the container image is still `ghcr.io/openhands/agent-canvas`; `OH_*` env vars and `--oh-*` CSS vars were left alone; the logo SVGs are still upstream artwork; the backend is still upstream's.
