@@ -57,6 +57,25 @@ ACTIVITY_WORDS = (
 
 _PULSE = "✦✧✦✧"
 
+# Palette. The panel is read at a glance while agent output scrolls past it,
+# so nothing informational goes below grey70 — `dim` and `bright_black` are
+# near-invisible on most terminal themes, which is where this started.
+STYLE_TEXT = "grey70"  # durations, token counts, the activity suffix
+STYLE_MUTED = "grey50"  # the unfilled tail of the bar: present, subordinate
+STYLE_WORD = "cyan"  # activity word body, under the sweeping band
+STYLE_BAR = "bright_cyan"  # filled bar cells
+STYLE_HEAD = "bold bright_white"  # the breathing leading cell
+STYLE_STAGE = "bold bright_cyan"  # the stage name
+
+_STATE_STYLES = {
+    "merged": "bold green",
+    "done": "bold green",
+    "green": "bold green",
+    "failed": "bold red",
+    "exhausted": "bold red",
+    "skipped": "yellow",
+}
+
 
 def activity_word(seed: str, rotation: int) -> str:
     """A stable word for this seed at this rotation; different per seed."""
@@ -76,11 +95,11 @@ def shimmer(word: str, tick: int):
         if distance == 0:
             style = "bold bright_white"
         elif distance == 1:
-            style = "bold white"
+            style = "bold bright_cyan"
         elif distance == 2:
-            style = "cyan"
+            style = "bright_cyan"
         else:
-            style = "bright_black"
+            style = STYLE_WORD
         text.append(char, style=style)
     return text
 
@@ -237,14 +256,14 @@ class RunMonitor:
         text = Text()
         for index in range(_BAR_WIDTH):
             if index < filled - 1:
-                text.append("▰", style="cyan")
+                text.append("▰", style=STYLE_BAR)
             elif index == filled - 1:
                 # the leading cell breathes so a long stage never looks stalled
-                text.append("▰", style="bold bright_cyan" if tick % 8 < 4 else "cyan")
+                text.append("▰", style=STYLE_HEAD if tick % 8 < 4 else STYLE_BAR)
             else:
-                text.append("▱", style="bright_black")
-        text.append(f"  {done}/{len(STAGES)} ", style="dim")
-        text.append(name, style="bold cyan")
+                text.append("▱", style=STYLE_MUTED)
+        text.append(f"  {done}/{len(STAGES)} ", style=STYLE_TEXT)
+        text.append(name, style=STYLE_STAGE)
         return text
 
     def usage_line(self) -> str:
@@ -332,34 +351,38 @@ class RunMonitor:
             head.append(_PULSE[self._tick % len(_PULSE)] + " ", style="bold magenta")
             head.append(shimmer(activity_word(stage, self._tick // _WORD_EVERY),
                                 self._tick))
-            head.append("… ", style="bright_black")
-            head.append(self._activity_suffix(stage), style="bright_black")
+            head.append("… ", style=STYLE_TEXT)
+            head.append(self._activity_suffix(stage), style=STYLE_TEXT)
             blocks.append(head)
             blocks.append(self._bar(self._tick))
         table = Table.grid(padding=(0, 2))
         table.add_column(width=3)
-        table.add_column(style="bold")
+        table.add_column(style="bold bright_white")
         table.add_column()
-        table.add_column(justify="right")
-        table.add_column(justify="right")
+        table.add_column(justify="right", style=STYLE_TEXT)
+        table.add_column(justify="right", style=STYLE_TEXT)
         frame = _SPINNER[self._tick % len(_SPINNER)]
         with self._lock:
             rows = sorted(self.phases.values(), key=lambda s: s.phase_id)
             for status in rows:
-                mark = frame if status.running else _state_mark(status.state)
-                label = f"{status.phase_id} {status.name}".strip()
+                state_style = _STATE_STYLES.get(status.state, STYLE_TEXT)
                 if status.running:
+                    mark = Text(frame, style=STYLE_BAR)
                     detail = activity_word(
                         status.phase_id, self._tick // _WORD_EVERY
                     ) + "…"
+                    detail_style = STYLE_WORD
                 else:
+                    mark = Text(_state_mark(status.state), style=state_style)
                     detail = status.state
+                    detail_style = state_style
+                label = f"{status.phase_id} {status.name}".strip()
                 if status.attempt > 1:
                     detail += f" (attempt {status.attempt})"
                 table.add_row(
                     mark,
                     label,
-                    detail,
+                    Text(detail, style=detail_style),
                     _fmt_duration(status.elapsed) if status.started else "",
                     f"{_fmt_tokens(status.tokens)} tok" if status.tokens else "",
                 )
@@ -367,7 +390,7 @@ class RunMonitor:
                 blocks.append(table)
         usage = self.usage_line()
         if usage:
-            blocks.append(Text(usage, style="dim"))
+            blocks.append(Text(usage, style=STYLE_TEXT))
         return Group(*blocks)
 
     def _print_summary(self) -> None:

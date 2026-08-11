@@ -135,6 +135,34 @@ class TestActivityWords:
         assert "max effort" in line
 
 
+class TestReadability:
+    # bright_black and dim render near-invisible on most terminal themes, and
+    # the panel is read at a glance while output scrolls past it.
+    def test_no_panel_style_falls_below_the_legible_floor(self):
+        from vyvcode.live import RunMonitor
+
+        monitor = RunMonitor(enabled=False)
+        monitor.stage("GRILL")
+        blocks = monitor._render().renderables
+        styles = {
+            str(span.style)
+            for block in blocks
+            if hasattr(block, "spans")
+            for span in block.spans
+        }
+
+        assert styles
+        assert not [s for s in styles if "bright_black" in s or "dim" in s]
+
+    def test_every_letter_of_the_activity_word_stays_legible(self):
+        from vyvcode.live import shimmer
+
+        for tick in range(24):
+            styles = {str(span.style) for span in shimmer("Harmonizing", tick).spans}
+
+            assert not [s for s in styles if "bright_black" in s or "dim" in s]
+
+
 class TestProgress:
     def test_stage_progress_renders_a_bar_and_advances(self):
         from vyvcode.live import RunMonitor
