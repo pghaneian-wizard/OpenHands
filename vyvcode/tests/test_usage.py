@@ -36,6 +36,22 @@ class TestLedger:
         assert rows["planner"].tokens == 350
         assert ledger.total_tokens() == 2150
 
+    def test_totals_keep_the_prompt_and_completion_halves_apart(self):
+        ledger = UsageLedger()
+        ledger.register("coder", FakeLLM("openai/kimi-k3", 1000, 200))
+        ledger.register("coder", FakeLLM("openai/kimi-k3", 500, 100))
+        ledger.register("planner", FakeLLM("anthropic/claude-fable-5", 300, 50))
+
+        coder = {row.role: row for row in ledger.snapshot()}["coder"]
+        totals = ledger.totals()
+
+        assert (coder.input_tokens, coder.output_tokens) == (1500, 300)
+        assert (totals.total, totals.input_tokens, totals.output_tokens) == (
+            2150,
+            1800,
+            350,
+        )
+
     def test_snapshot_reflects_live_growth_without_reregistering(self):
         ledger = UsageLedger()
         llm = FakeLLM("openai/kimi-k3")
@@ -79,6 +95,19 @@ class TestToolbar:
         assert "kimi-k3" in text
         assert "12.3k" in text
         assert "$0.42" in text
+
+    def test_toolbar_breaks_the_total_into_input_and_output(self, tmp_path):
+        from vyvcode.tui import bottom_toolbar
+
+        cfg = load_config(tmp_path, env={})
+        ledger = UsageLedger()
+        ledger.register("coder", FakeLLM("openai/kimi-k3", 12_000, 300, 0.42))
+
+        text = bottom_toolbar(cfg, ledger)
+
+        assert "Total: 12.3k" in text
+        assert "Input: 12.0k" in text
+        assert "Output: 300" in text
 
     def test_toolbar_falls_back_to_configured_models_before_any_spend(self, tmp_path):
         from vyvcode.tui import bottom_toolbar
@@ -302,6 +331,34 @@ class TestUsageColors:
 
         assert "coder kimi-k3" in text.plain
         assert {text.plain[s.start : s.end] for s in token_spans} == {"88.4k", "104"}
+
+    # The right-hand readout used to be one number; a total alone hides which
+    # half of the spend is growing, and the two are priced differently.
+    def test_session_total_is_split_into_input_and_output(self, tmp_path):
+        from vyvcode.live import STYLE_INPUT, STYLE_OUTPUT, STYLE_TOTAL, RunMonitor
+
+        ledger = UsageLedger()
+        ledger.register("coder", FakeLLM("openai/kimi-k3", 80_000, 8_400, 0.12))
+        monitor = RunMonitor(enabled=False, ledger=ledger)
+
+        text = monitor.usage_text()
+        styled = {str(s.style): text.plain[s.start : s.end] for s in text.spans}
+
+        assert "Total: 88.4k  Input: 80.0k  Output: 8.4k" in text.plain
+        assert styled[STYLE_TOTAL] == "88.4k"
+        assert styled[STYLE_INPUT] == "80.0k"
+        assert styled[STYLE_OUTPUT] == "8.4k"
+
+    def test_phase_rows_carry_the_same_split_on_their_right(self):
+        from vyvcode.live import RunMonitor
+
+        monitor = RunMonitor(enabled=False, ledger=UsageLedger())
+        monitor.register("P1", "auth API")
+        monitor.progress("P1", tokens=5_500, input_tokens=5_000, output_tokens=500)
+
+        cell = [c for c in monitor._render().renderables[0].columns[-1].cells][0]
+
+        assert cell.plain == "Total: 5.5k  Input: 5.0k  Output: 500"
 
     def test_usage_text_is_empty_before_any_spend(self):
         from vyvcode.live import RunMonitor

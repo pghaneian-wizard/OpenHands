@@ -10,9 +10,9 @@ from prompt_toolkit.styles import Style
 
 from vyvcode.commands import RAW_PREFIX
 from vyvcode.config import VyvConfig
-from vyvcode.usage import fmt_tokens
+from vyvcode.usage import fmt_split, fmt_tokens
 from vyvcode.usage import ledger as usage_ledger
-from vyvcode.usage import short_model
+from vyvcode.usage import short_model, split_of
 
 # Command -> one-line help, shown in the completion menu (README table).
 COMMAND_HELP: dict[str, str] = {
@@ -73,9 +73,9 @@ def bottom_toolbar(cfg: VyvConfig, ledger=None):
             for row in rows
         )
         cost = ledger.total_cost()
-        total = f"  |  {fmt_tokens(ledger.total_tokens())} tok"
+        total = f"  |  {fmt_split(split_of(rows))}"
         if cost:
-            total += f" ${cost:.2f}"
+            total += f"  ${cost:.2f}"
     else:
         models = " · ".join(
             f"{role} {short_model(cfg.roles[role].model)}"

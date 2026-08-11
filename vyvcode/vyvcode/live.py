@@ -73,6 +73,8 @@ STYLE_STAGE = "bold bright_cyan"  # the stage name
 STYLE_AGENT = "bold bright_white"  # which role and model owns a row
 STYLE_TOKENS = "yellow"  # per-model token counts, read apart from their names
 STYLE_TOTAL = "bold yellow"  # the session total
+STYLE_INPUT = "bright_cyan"  # the prompt half of a total
+STYLE_OUTPUT = "bright_magenta"  # the completion half of a total
 STYLE_COST = "bold green"  # dollars
 STYLE_MODE = "bold magenta"  # the active-mode badge
 
@@ -126,6 +128,8 @@ class PhaseStatus:
     started: float | None = None
     ended: float | None = None
     tokens: int = 0
+    input_tokens: int = 0
+    output_tokens: int = 0
     cost: float = 0.0
     steps: int = 0
 
@@ -139,6 +143,12 @@ class PhaseStatus:
     def running(self) -> bool:
         return self.started is not None and self.ended is None
 
+    @property
+    def split(self):
+        from vyvcode.usage import TokenSplit
+
+        return TokenSplit(self.tokens, self.input_tokens, self.output_tokens)
+
 
 def _fmt_duration(seconds: float) -> str:
     minutes, secs = divmod(int(seconds), 60)
@@ -151,6 +161,23 @@ def _fmt_tokens(tokens: int) -> str:
     if tokens >= 1_000:
         return f"{tokens / 1_000:.1f}k"
     return str(tokens)
+
+
+def _split_text(split, total_style: str = STYLE_TOTAL):
+    """`Total: … Input: … Output: …` — labels quiet, each number its own colour."""
+    from rich.text import Text
+
+    text = Text()
+    for label, value, style in (
+        ("Total: ", split.total, total_style),
+        ("Input: ", split.input_tokens, STYLE_INPUT),
+        ("Output: ", split.output_tokens, STYLE_OUTPUT),
+    ):
+        if len(text):
+            text.append("  ", style=STYLE_TEXT)
+        text.append(label, style=STYLE_TEXT)
+        text.append(_fmt_tokens(value), style=style)
+    return text
 
 
 @dataclass
@@ -362,15 +389,18 @@ class RunMonitor:
         rows = self.ledger.snapshot() if self.ledger is not None else []
         if not rows:
             return ""
-        from vyvcode.usage import fmt_tokens, short_model
+        from vyvcode.usage import fmt_split, fmt_tokens, short_model, split_of
 
         parts = " · ".join(
             f"{row.role} {short_model(row.model)} {fmt_tokens(row.tokens)}"
             for row in rows
         )
         cost = sum(row.cost for row in rows)
-        total = fmt_tokens(sum(row.tokens for row in rows))
-        return parts + f"  |  {total} tok" + (f" ${cost:.2f}" if cost else "")
+        return (
+            parts
+            + f"  |  {fmt_split(split_of(rows))}"
+            + (f"  ${cost:.2f}" if cost else "")
+        )
 
     def usage_text(self):
         """`usage_line` for the panel: token counts coloured apart from names."""
@@ -379,7 +409,7 @@ class RunMonitor:
             return None
         from rich.text import Text
 
-        from vyvcode.usage import fmt_tokens, short_model
+        from vyvcode.usage import fmt_tokens, short_model, split_of
 
         text = Text()
         for index, row in enumerate(rows):
@@ -388,11 +418,10 @@ class RunMonitor:
             text.append(f"{row.role} {short_model(row.model)} ", style=STYLE_TEXT)
             text.append(fmt_tokens(row.tokens), style=STYLE_TOKENS)
         text.append("  |  ", style=STYLE_MUTED)
-        text.append(fmt_tokens(sum(row.tokens for row in rows)), style=STYLE_TOTAL)
-        text.append(" tok", style=STYLE_TEXT)
+        text.append(_split_text(split_of(rows)))
         cost = sum(row.cost for row in rows)
         if cost:
-            text.append(f" ${cost:.2f}", style=STYLE_COST)
+            text.append(f"  ${cost:.2f}", style=STYLE_COST)
         return text
 
     def register(self, phase_id: str, name: str, role: str = "coder") -> None:
@@ -416,13 +445,22 @@ class RunMonitor:
             status.ended = None
         self._refresh()
 
-    def progress(self, phase_id: str, tokens: int = 0, cost: float = 0.0) -> None:
+    def progress(
+        self,
+        phase_id: str,
+        tokens: int = 0,
+        cost: float = 0.0,
+        input_tokens: int = 0,
+        output_tokens: int = 0,
+    ) -> None:
         with self._lock:
             status = self.phases.get(phase_id)
             if status is None:
                 return
             status.steps += 1
             status.tokens = max(status.tokens, tokens)
+            status.input_tokens = max(status.input_tokens, input_tokens)
+            status.output_tokens = max(status.output_tokens, output_tokens)
             status.cost = max(status.cost, cost)
         self._refresh()
 
@@ -504,7 +542,7 @@ class RunMonitor:
                     self._row_label(status),
                     Text(detail, style=detail_style),
                     _fmt_duration(status.elapsed) if status.started else "",
-                    f"{_fmt_tokens(status.tokens)} tok" if status.tokens else "",
+                    _split_text(status.split, STYLE_TOKENS) if status.tokens else "",
                 )
             if rows:
                 blocks.append(table)
@@ -521,19 +559,21 @@ class RunMonitor:
             self.out(f"  spend: {usage}")
         if not rows or not any(s.started for s in rows):
             return
+        from vyvcode.usage import fmt_split, split_of
+
         for status in rows:
             if not status.started:
                 continue
             self.out(
                 f"  {self._row_label(status).plain}: {status.state} in "
                 f"{_fmt_duration(status.elapsed)}"
-                + (f", {_fmt_tokens(status.tokens)} tokens" if status.tokens else "")
+                + (f", {fmt_split(status.split)}" if status.tokens else "")
             )
-        swarm_tokens = sum(s.tokens for s in rows)
-        if swarm_tokens:
+        swarm = split_of(rows)
+        if swarm:
             swarm_cost = sum(s.cost for s in rows)
-            spend = f", ${swarm_cost:.2f}" if swarm_cost else ""
-            self.out(f"  swarm total: {_fmt_tokens(swarm_tokens)} tokens{spend}")
+            spend = f"  ${swarm_cost:.2f}" if swarm_cost else ""
+            self.out(f"  swarm spend: {fmt_split(swarm)}{spend}")
 
 
 def _state_mark(state: str) -> str:
@@ -553,14 +593,16 @@ def token_reporter(llm, monitor: SwarmMonitor | None, phase_id: str):
 
     def on_event(_event) -> None:
         usage = getattr(getattr(llm, "metrics", None), "accumulated_token_usage", None)
-        tokens = 0
-        if usage is not None:
-            tokens = (
-                getattr(usage, "prompt_tokens", 0)
-                + getattr(usage, "completion_tokens", 0)
-            )
+        prompt = getattr(usage, "prompt_tokens", 0) if usage is not None else 0
+        completion = getattr(usage, "completion_tokens", 0) if usage is not None else 0
         cost = getattr(getattr(llm, "metrics", None), "accumulated_cost", 0.0) or 0.0
-        monitor.progress(phase_id, tokens=tokens, cost=cost)
+        monitor.progress(
+            phase_id,
+            tokens=prompt + completion,
+            cost=cost,
+            input_tokens=prompt,
+            output_tokens=completion,
+        )
 
     return on_event
 

@@ -163,7 +163,10 @@ class TestScheduler:
         assert {s.state for s in monitor.phases.values()} == {"merged"}
         assert all(s.tokens == 1000 for s in monitor.phases.values())
         assert all(s.elapsed > 0 for s in monitor.phases.values())
-        assert any("swarm total: 4.0k tokens" in line for line in printed)
+        assert any(
+            "swarm spend: Total: 4.0k  Input: 3.6k  Output: 400" in line
+            for line in printed
+        )
 
     def test_build_artifacts_left_by_the_coder_do_not_fail_the_phase(self, repo):
         # The coder prompt orders it to run its own tests, which drops
