@@ -51,7 +51,9 @@ def run_pipeline(
     ask_user = ask_user or (lambda: input("answers> "))
     raw_text = redact(raw_text, cfg.secret_values)  # never toward a model or disk
     run = Run(cfg.runs_dir, raw_text or mode)
-    monitor = monitor or RunMonitor(out=out, cfg=cfg)
+    from vyvcode.commands import command_for_mode
+
+    monitor = monitor or RunMonitor(out=out, cfg=cfg, mode=command_for_mode(mode))
 
     def check_abort() -> None:
         if run.is_aborted:

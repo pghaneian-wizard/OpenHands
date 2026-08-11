@@ -187,6 +187,21 @@ def execute(parsed: Parsed, handlers) -> str | None:
 # ── Fast path (D1): one coder, no pipeline ──────────────────────────────────
 
 _FAST_PATH_ID = "task"
+_LABEL_WIDTH = 48  # the panel row shares a line with the word, clock and tokens
+
+
+def command_for_mode(mode: str) -> str:
+    """The slash command a pipeline mode came from, for the live-panel badge."""
+    for token, name in PIPELINE_COMMANDS.items():
+        if name == mode:
+            return token
+    return mode
+
+
+def task_label(text: str, limit: int = _LABEL_WIDTH) -> str:
+    """One-line summary of a request, for the panel row that runs it."""
+    line = " ".join(text.split())
+    return line if len(line) <= limit else line[: limit - 1].rstrip() + "…"
 
 
 def run_fast_path(
@@ -212,10 +227,11 @@ def run_fast_path(
         visualizer=quiet_visualizer(),
         callbacks=[token_reporter(coder, monitor, _FAST_PATH_ID)],
     )
-    monitor.register(_FAST_PATH_ID, "task")
+    label = task_label(text)
+    monitor.register(_FAST_PATH_ID, label, role="coder")
     monitor.__enter__()
     monitor.stage("EXECUTING")
-    monitor.start(_FAST_PATH_ID, "task")
+    monitor.start(_FAST_PATH_ID, label, role="coder")
     try:
         conversation.set_confirmation_policy(NeverConfirm())
         conversation.send_message(text)

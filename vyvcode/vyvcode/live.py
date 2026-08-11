@@ -66,6 +66,13 @@ STYLE_WORD = "cyan"  # activity word body, under the sweeping band
 STYLE_BAR = "bright_cyan"  # filled bar cells
 STYLE_HEAD = "bold bright_white"  # the breathing leading cell
 STYLE_STAGE = "bold bright_cyan"  # the stage name
+STYLE_AGENT = "bold bright_white"  # which role and model owns a row
+STYLE_TOKENS = "yellow"  # per-model token counts, read apart from their names
+STYLE_TOTAL = "bold yellow"  # the session total
+STYLE_COST = "bold green"  # dollars
+STYLE_MODE = "bold magenta"  # the active-mode badge
+
+_MODE_MARK = "◎"
 
 _STATE_STYLES = {
     "merged": "bold green",
@@ -109,6 +116,7 @@ def shimmer(word: str, tick: int):
 class PhaseStatus:
     phase_id: str
     name: str = ""
+    role: str = "coder"  # which configured role is doing this work
     state: str = "waiting"
     attempt: int = 0
     started: float | None = None
@@ -149,6 +157,7 @@ class RunMonitor:
     enabled: bool | None = None  # None = auto-detect a terminal
     ledger: object = None  # defaults to the process-wide usage ledger
     cfg: object = None  # optional: lets the activity line name the working model
+    mode: str = ""  # the command that started this run, e.g. "/goal"
     phases: dict[str, PhaseStatus] = field(default_factory=dict)
     stage_name: str = ""
     started: float | None = None
@@ -245,6 +254,20 @@ class RunMonitor:
         bar = "█" * filled + "░" * (_BAR_WIDTH - filled)
         return f"{bar} {done}/{len(STAGES)} {name}"
 
+    def _head_row(self, head):
+        """The activity line, with the mode badge pinned to the right margin."""
+        badge = self.mode_line()
+        if not badge:
+            return head
+        from rich.table import Table
+        from rich.text import Text
+
+        row = Table.grid(expand=True)
+        row.add_column()
+        row.add_column(justify="right")
+        row.add_row(head, Text(badge, style=STYLE_MODE))
+        return row
+
     def _bar(self, tick: int):
         """Progress bar with a comet head that keeps moving while a stage works."""
         from rich.text import Text
@@ -266,6 +289,39 @@ class RunMonitor:
         text.append(name, style=STYLE_STAGE)
         return text
 
+    def mode_line(self) -> str:
+        """`◎ /goal active (56s)` — which mode owns the session, and for how long."""
+        if not self.mode:
+            return ""
+        with self._lock:
+            started = self.started
+        elapsed = _fmt_duration(time.monotonic() - started) if started else "0s"
+        return f"{_MODE_MARK} {self.mode} active ({elapsed})"
+
+    def agent_label(self, role: str) -> str:
+        """`role model` when that role is configured, else the bare role."""
+        roles = getattr(self.cfg, "roles", {}) if self.cfg is not None else {}
+        if role not in roles:
+            return role
+        from vyvcode.usage import short_model
+
+        return f"{role} {short_model(roles[role].model)}"
+
+    def _row_label(self, status: PhaseStatus):
+        """Who is working, then what on. Never repeats the identifier."""
+        from rich.text import Text
+
+        seen: list[str] = []
+        for part in (status.phase_id, status.name):
+            if part and part not in seen:
+                seen.append(part)
+        text = Text()  # empty, so a base style never bleeds into the task text
+        text.append(self.agent_label(status.role), style=STYLE_AGENT)
+        if seen:
+            text.append("  ·  ", style=STYLE_MUTED)
+            text.append(" ".join(seen), style=STYLE_TEXT)
+        return text
+
     def usage_line(self) -> str:
         """This session's spend, one entry per model."""
         rows = self.ledger.snapshot() if self.ledger is not None else []
@@ -281,14 +337,44 @@ class RunMonitor:
         total = fmt_tokens(sum(row.tokens for row in rows))
         return parts + f"  |  {total} tok" + (f" ${cost:.2f}" if cost else "")
 
-    def register(self, phase_id: str, name: str) -> None:
-        with self._lock:
-            self.phases.setdefault(phase_id, PhaseStatus(phase_id, name))
+    def usage_text(self):
+        """`usage_line` for the panel: token counts coloured apart from names."""
+        rows = self.ledger.snapshot() if self.ledger is not None else []
+        if not rows:
+            return None
+        from rich.text import Text
 
-    def start(self, phase_id: str, name: str = "", attempt: int = 1) -> None:
+        from vyvcode.usage import fmt_tokens, short_model
+
+        text = Text()
+        for index, row in enumerate(rows):
+            if index:
+                text.append(" · ", style=STYLE_MUTED)
+            text.append(f"{row.role} {short_model(row.model)} ", style=STYLE_TEXT)
+            text.append(fmt_tokens(row.tokens), style=STYLE_TOKENS)
+        text.append("  |  ", style=STYLE_MUTED)
+        text.append(fmt_tokens(sum(row.tokens for row in rows)), style=STYLE_TOTAL)
+        text.append(" tok", style=STYLE_TEXT)
+        cost = sum(row.cost for row in rows)
+        if cost:
+            text.append(f" ${cost:.2f}", style=STYLE_COST)
+        return text
+
+    def register(self, phase_id: str, name: str, role: str = "coder") -> None:
+        with self._lock:
+            self.phases.setdefault(phase_id, PhaseStatus(phase_id, name, role))
+
+    def start(
+        self,
+        phase_id: str,
+        name: str = "",
+        attempt: int = 1,
+        role: str = "",
+    ) -> None:
         with self._lock:
             status = self.phases.setdefault(phase_id, PhaseStatus(phase_id, name))
             status.name = name or status.name
+            status.role = role or status.role
             status.state = "coding"
             status.attempt = attempt
             status.started = time.monotonic()
@@ -353,11 +439,11 @@ class RunMonitor:
                                 self._tick))
             head.append("… ", style=STYLE_TEXT)
             head.append(self._activity_suffix(stage), style=STYLE_TEXT)
-            blocks.append(head)
+            blocks.append(self._head_row(head))
             blocks.append(self._bar(self._tick))
         table = Table.grid(padding=(0, 2))
         table.add_column(width=3)
-        table.add_column(style="bold bright_white")
+        table.add_column()  # the label carries its own styles (agent, then task)
         table.add_column()
         table.add_column(justify="right", style=STYLE_TEXT)
         table.add_column(justify="right", style=STYLE_TEXT)
@@ -376,21 +462,20 @@ class RunMonitor:
                     mark = Text(_state_mark(status.state), style=state_style)
                     detail = status.state
                     detail_style = state_style
-                label = f"{status.phase_id} {status.name}".strip()
                 if status.attempt > 1:
                     detail += f" (attempt {status.attempt})"
                 table.add_row(
                     mark,
-                    label,
+                    self._row_label(status),
                     Text(detail, style=detail_style),
                     _fmt_duration(status.elapsed) if status.started else "",
                     f"{_fmt_tokens(status.tokens)} tok" if status.tokens else "",
                 )
             if rows:
                 blocks.append(table)
-        usage = self.usage_line()
-        if usage:
-            blocks.append(Text(usage, style=STYLE_TEXT))
+        usage = self.usage_text()
+        if usage is not None:
+            blocks.append(usage)
         return Group(*blocks)
 
     def _print_summary(self) -> None:
@@ -405,7 +490,7 @@ class RunMonitor:
             if not status.started:
                 continue
             self.out(
-                f"  {status.phase_id} {status.name}: {status.state} in "
+                f"  {self._row_label(status).plain}: {status.state} in "
                 f"{_fmt_duration(status.elapsed)}"
                 + (f", {_fmt_tokens(status.tokens)} tokens" if status.tokens else "")
             )

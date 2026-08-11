@@ -190,3 +190,124 @@ class TestProgress:
         monitor.__exit__(None, None, None)
 
         assert any("kimi-k3" in line and "21.0k" in line for line in printed)
+
+
+class TestPhaseRows:
+    # A row used to read "task task": the phase id was joined to a name that
+    # repeated it, and nothing on the row said which agent was working.
+    def test_row_names_the_working_agent_and_the_task(self, tmp_path):
+        from vyvcode.live import RunMonitor
+
+        cfg = load_config(tmp_path, env={})
+        monitor = RunMonitor(enabled=False, cfg=cfg)
+        monitor.register("task", "add a health endpoint", role="coder")
+
+        label = monitor._row_label(monitor.phases["task"]).plain
+
+        assert "coder" in label
+        assert cfg.roles["coder"].model.split("/")[-1] in label
+        assert "add a health endpoint" in label
+        assert "task task" not in label
+
+    def test_identifier_is_not_repeated_when_it_is_also_the_name(self, tmp_path):
+        from vyvcode.live import RunMonitor
+
+        monitor = RunMonitor(enabled=False, cfg=load_config(tmp_path, env={}))
+        monitor.register("task", "task")
+
+        assert monitor._row_label(monitor.phases["task"]).plain.count("task") == 1
+
+    def test_swarm_rows_keep_the_phase_id_beside_the_phase_name(self, tmp_path):
+        from vyvcode.live import RunMonitor
+
+        monitor = RunMonitor(enabled=False, cfg=load_config(tmp_path, env={}))
+        monitor.register("P1", "auth API")
+
+        label = monitor._row_label(monitor.phases["P1"]).plain
+
+        assert "P1" in label
+        assert "auth API" in label
+
+    def test_row_falls_back_to_the_role_alone_without_a_config(self):
+        from vyvcode.live import RunMonitor
+
+        monitor = RunMonitor(enabled=False)
+        monitor.register("P1", "auth API", role="reviewer")
+
+        assert "reviewer" in monitor._row_label(monitor.phases["P1"]).plain
+
+
+class TestUsageColors:
+    def test_token_counts_are_styled_apart_from_the_role_and_model(self, tmp_path):
+        from vyvcode.live import STYLE_TOKENS, RunMonitor
+
+        ledger = UsageLedger()
+        ledger.register("coder", FakeLLM("openai/kimi-k3", 80_000, 8_400, 0.12))
+        ledger.register("planner", FakeLLM("anthropic/claude-fable-5", 100, 4))
+        monitor = RunMonitor(enabled=False, ledger=ledger, cfg=load_config(tmp_path, env={}))
+
+        text = monitor.usage_text()
+        token_spans = [s for s in text.spans if str(s.style) == STYLE_TOKENS]
+
+        assert "coder kimi-k3" in text.plain
+        assert {text.plain[s.start : s.end] for s in token_spans} == {"88.4k", "104"}
+
+    def test_usage_text_is_empty_before_any_spend(self):
+        from vyvcode.live import RunMonitor
+
+        assert RunMonitor(enabled=False, ledger=UsageLedger()).usage_text() is None
+
+
+class TestModeBadge:
+    def test_active_mode_is_named_with_its_elapsed_time(self):
+        from vyvcode.live import RunMonitor
+
+        monitor = RunMonitor(enabled=False, mode="/goal")
+        monitor.stage("GRILL")
+
+        line = monitor.mode_line()
+
+        assert line.startswith("◎ /goal active (")
+        assert line.endswith("s)")
+
+    def test_no_badge_without_a_mode(self):
+        from vyvcode.live import RunMonitor
+
+        monitor = RunMonitor(enabled=False)
+        monitor.stage("GRILL")
+
+        assert monitor.mode_line() == ""
+
+    def test_badge_sits_to_the_right_of_the_activity_line(self):
+        from vyvcode.live import RunMonitor
+
+        monitor = RunMonitor(enabled=False, mode="/plan")
+        monitor.stage("PLANNING")
+
+        head = monitor._render().renderables[0]
+        cells = [cell for row in head.columns for cell in row.cells]
+
+        assert head.columns[1].justify == "right"
+        assert any("/plan active" in getattr(cell, "plain", "") for cell in cells)
+
+    def test_pipeline_modes_map_back_to_their_slash_commands(self):
+        from vyvcode.commands import command_for_mode
+
+        assert command_for_mode("goal") == "/goal"
+        assert command_for_mode("brainstorm") == "/vyvcode:brainstorm"
+
+
+class TestTaskLabel:
+    def test_long_requests_are_trimmed_to_one_line(self):
+        from vyvcode.commands import task_label
+
+        label = task_label("add a health endpoint\nthen wire it into the router " * 3)
+
+        assert "\n" not in label
+        assert len(label) <= 48
+        assert label.endswith("…")
+
+    def test_short_requests_are_kept_whole(self):
+        from vyvcode.commands import task_label
+
+        assert task_label("  fix the  parser  ") == "fix the parser"
