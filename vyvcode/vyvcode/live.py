@@ -23,7 +23,11 @@ _WORD_EVERY = 24  # refreshes between activity words (~6s at 4/s)
 # The pipeline's stages in order; the bar fills as the run walks them.
 STAGES = ("GRILL", "BRIEF", "PLANNING", "EXECUTING", "REVIEWING", "REPORTING", "DONE")
 
-# Which role does the talking in each stage — named in the activity line.
+# Which role does the talking in each stage — the activity line's fallback
+# before any spend lands. Once tokens move, the line follows the spender
+# instead: a stage's nominal owner and its actual worker diverge (a grill
+# NEEDS-FACT hands the coder-role explorer the terminal for as long as it
+# takes, while the stage stays GRILL).
 STAGE_ROLES = {
     "GRILL": "communicator",
     "BRIEF": "communicator",
@@ -164,6 +168,8 @@ class RunMonitor:
     _lock: threading.Lock = field(default_factory=threading.Lock, repr=False)
     _live: object = field(default=None, repr=False)
     _tick: int = 0
+    _seen_tokens: dict = field(default_factory=dict, repr=False)
+    _spender: tuple | None = field(default=None, repr=False)
 
     def __post_init__(self) -> None:
         if self.enabled is None:
@@ -235,13 +241,42 @@ class RunMonitor:
         return "(" + " · ".join(bits) + ")"
 
     def _working_on(self, stage: str) -> str:
-        role = STAGE_ROLES.get(stage, "")
-        if self.cfg is None or role not in getattr(self.cfg, "roles", {}):
-            return stage
-        r = self.cfg.roles[role]
         from vyvcode.usage import short_model
 
+        roles = getattr(self.cfg, "roles", {}) if self.cfg is not None else {}
+        spender = self._spend_leader()
+        if spender is not None:
+            role, model = spender
+            if role in roles:
+                return f"{role} {short_model(model)} at {roles[role].effort} effort"
+            return f"{role} {short_model(model)}"
+        role = STAGE_ROLES.get(stage, "")
+        if role not in roles:
+            return stage
+        r = roles[role]
         return f"{role} {short_model(r.model)} at {r.effort} effort"
+
+    def _spend_leader(self) -> tuple | None:
+        """The (role, model) whose tokens last grew — who is really working.
+
+        Sticky between updates: a long single call reports no delta until it
+        lands, and the line should keep naming its owner rather than snap back
+        to the stage default.
+        """
+        if self.ledger is None:
+            return None
+        rows = self.ledger.snapshot()
+        with self._lock:
+            best, best_delta = None, 0
+            for row in rows:
+                key = (row.role, row.model)
+                delta = row.tokens - self._seen_tokens.get(key, 0)
+                self._seen_tokens[key] = row.tokens
+                if delta > best_delta:
+                    best, best_delta = key, delta
+            if best is not None:
+                self._spender = best
+            return self._spender
 
     def progress_line(self) -> str:
         """The stage bar as plain text (also what non-terminal runs print)."""

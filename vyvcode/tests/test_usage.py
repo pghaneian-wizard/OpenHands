@@ -134,6 +134,57 @@ class TestActivityWords:
         assert "claude-fable-5" in line
         assert "max effort" in line
 
+    # The grill stage belongs to the communicator, but a NEEDS-FACT dispatch
+    # hands an explorer (the coder role) the terminal for as long as it takes.
+    # The header must follow the spend, not the stage's nominal owner.
+    def test_activity_line_names_who_is_actually_spending(self, tmp_path):
+        from vyvcode.live import RunMonitor
+
+        cfg = load_config(tmp_path, env={})
+        ledger = UsageLedger()
+        coder = FakeLLM("openai/kimi-k3")
+        ledger.register("coder", coder)
+        monitor = RunMonitor(enabled=False, ledger=ledger, cfg=cfg)
+        monitor.stage("GRILL")
+
+        coder.metrics = FakeMetrics(prompt=5_000, completion=500)
+        line = monitor.activity_line()
+
+        assert "coder kimi-k3" in line
+        assert "communicator" not in line
+
+    def test_activity_line_falls_back_to_the_stage_role_before_any_spend(self, tmp_path):
+        from vyvcode.live import RunMonitor
+
+        cfg = load_config(tmp_path, env={})
+        monitor = RunMonitor(enabled=False, ledger=UsageLedger(), cfg=cfg)
+        monitor.stage("GRILL")
+
+        line = monitor.activity_line()
+
+        assert "communicator" in line
+
+    def test_activity_line_moves_on_when_the_spend_does(self, tmp_path):
+        from vyvcode.live import RunMonitor
+
+        cfg = load_config(tmp_path, env={})
+        ledger = UsageLedger()
+        coder = FakeLLM("openai/kimi-k3")
+        talker = FakeLLM("openai/gpt-5.6-sol")
+        ledger.register("coder", coder)
+        ledger.register("communicator", talker)
+        monitor = RunMonitor(enabled=False, ledger=ledger, cfg=cfg)
+        monitor.stage("GRILL")
+
+        coder.metrics = FakeMetrics(prompt=5_000, completion=500)
+        assert "coder kimi-k3" in monitor.activity_line()
+
+        talker.metrics = FakeMetrics(prompt=2_000, completion=200)
+        line = monitor.activity_line()
+
+        assert "communicator gpt-5.6-sol" in line
+        assert "kimi-k3" not in line
+
 
 class TestReadability:
     # bright_black and dim render near-invisible on most terminal themes, and
